@@ -6,6 +6,7 @@ from gym_factored.envs.base import DiscreteEnv
 from planners.abs_lp_optimistic import AbsOptimisticLinearProgrammingPlanner
 from util.mdp import get_mdp_functions
 from util.mdp import get_mdp_functions_partial
+from agents.multi_agent_env import MultiAgentDifficultCMDPWrapper
 
 np.seterr(invalid='ignore', divide='ignore')
 
@@ -24,7 +25,11 @@ class AbsOptCMDPAgent:
                  policy_type='ground',
                  cost_bound_coefficient=1,
                  solver='grb',  # grb, cvxpy
-                 verbose=False):
+                 verbose=False,
+                 reward_scale=1.0,
+                 cost_scale=1.0,
+                 agent_id=0):
+
         self.ns, self.na = ns, na
         self.terminal = terminal
         self.isd = isd
@@ -34,6 +39,10 @@ class AbsOptCMDPAgent:
         self.policy_type = policy_type
         self.cost_bound_coefficient = cost_bound_coefficient
         self.verbose = verbose
+
+        self.reward_scale = reward_scale
+        self.cost_scale = cost_scale
+        self.agent_id = agent_id
 
         self.max_reward = max(max_reward, 0)
         self.min_reward = min_reward
@@ -95,20 +104,26 @@ class AbsOptCMDPAgent:
         )
 
     @classmethod
-    def from_discrete_env(cls, env: DiscreteEnv, features: Sequence = None, **kwargs) -> 'AbsOptCMDPAgent':
-        transition, reward, _, terminal = get_mdp_functions(env)
-        for s in np.arange(env.nS)[terminal]:
-            transition[s, :, :] = 0
-            transition[s, :, s] = 1
-            reward[s, :] = 0
-        max_reward, min_reward = reward.max(), reward.min()
-        abs_transition, abs_reward, abs_cost, abs_terminal, abs_map = get_mdp_functions_partial(env, features)
-        for s in np.arange(abs_terminal.shape[0])[abs_terminal]:
-            abs_transition[s, :, :] = 0
-            abs_transition[s, :, s] = 1
+    def from_discrete_env(cls, env: MultiAgentDifficultCMDPWrapper, agent_id=0, **kwargs):
+        """
+        Initializes AbsOptCMDPAgent with the correct agent-specific CMDP view.
+        """
+        if hasattr(env, 'envs'):
+            agent_env = env.envs[agent_id]  # Selects the agent's specific environment
+        else:
+            agent_env = env
+        transition, reward, _, terminal = get_mdp_functions(agent_env)
 
-        return cls(env.nS, env.nA, terminal, env.isd, env, max_reward, min_reward,
-                   abs_transition, abs_cost, abs_terminal, abs_map, **kwargs)
+        # Forward necessary environment attributes
+        max_reward, min_reward = reward.max(), reward.min()
+        abs_transition, abs_reward, abs_cost, abs_terminal, abs_map = get_mdp_functions_partial(agent_env, kwargs.get('features', [0]))
+
+        kwargs.pop('features', None)  # Avoids unexpected argument error
+
+        return cls(
+            agent_env.nS, agent_env.nA, terminal, agent_env.isd, agent_env,
+            max_reward, min_reward, abs_transition, abs_cost, abs_terminal, abs_map, **kwargs, agent_id=agent_id
+        )
 
     def ensure_terminal_states_are_absorbing(self):
         for s in np.arange(self.ns)[self.terminal]:
@@ -142,9 +157,13 @@ class AbsOptCMDPAgent:
 
     def update_estimate(self):
         counter_sa = np.maximum(self.counter_sas.sum(axis=2), 1)
-        self.estimated_transition = self.counter_sas/counter_sa[:, :, np.newaxis]
-        self.estimated_reward = self.acc_reward/counter_sa
+        self.estimated_transition = self.counter_sas / counter_sa[:, :, np.newaxis]
+        # Scale the reward estimate by an agent-specific factor
+        self.estimated_reward = (self.acc_reward / counter_sa) * self.reward_scale
+        # (Optionally, scale the cost estimate if needed)
+        # self.estimated_cost = (self.acc_cost / counter_sa) * self.cost_scale
         self.ensure_terminal_states_are_absorbing()
+
 
     def update_planner(self):
         self.planner = self.instantiate_planner()
@@ -157,4 +176,21 @@ class AbsOptCMDPAgent:
 
     def seed(self, seed):
         self.planner.seed(seed)
+
+    def get_expected_reward(self, state):
+        """
+        Compute the expected reward at a given state.
+        `state` should be a single state index (e.g. an integer).
+        """
+        # Ensure that the planner's policy is available.
+        # We assume that self.planner.policy is an array of shape (horizon, ns, na)
+        try:
+            policy_at_state = self.planner.policy[self.planner.time_step][state]
+        except Exception as e:
+            print("Error accessing policy at time step", self.planner.time_step, "state", state, ":", e)
+            return 0.0
+        # Compute the expected reward as the dot-product between the policy and the estimated rewards.
+        expected_reward = np.dot(policy_at_state, self.estimated_reward[state])
+        return expected_reward
+
 

@@ -62,7 +62,21 @@ class LinearProgrammingPlanner:
         self.time_step = 0
 
     def act(self, state):
-        action = self.rng.choice(self.actions, size=1, p=self.policy[self.time_step][state])[0]
+        probabilities = self.policy[self.time_step][state]
+        if probabilities.ndim > 1:
+            agent_id = getattr(self, 'agent_id', 0)  # Ensure each agent has an ID
+            probabilities = probabilities[agent_id]  # Select only this agent's row
+
+        if len(probabilities) != len(self.actions):
+            raise ValueError(
+                f"Size mismatch: actions={len(self.actions)}, probabilities={len(probabilities)}\n"
+                f"Probabilities: {probabilities}"
+            )
+        if probabilities is None or not isinstance(probabilities, np.ndarray):
+            raise ValueError(f"Policy distribution is invalid: {probabilities}")
+        if probabilities.ndim != 1:
+            raise ValueError(f"Policy probabilities must be 1D, got shape {probabilities.shape}")
+        action = self.rng.choice(self.actions, size=1, p=probabilities)[0]
         self.time_step += 1
         return action
 
