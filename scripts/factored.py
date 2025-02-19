@@ -34,7 +34,7 @@ def main():
             'policy_type': 'ground',
             'agent_id': 1,
             'reward_scale': 0.5,
-            'cost_scale': 1.0
+            'cost_scale': 2.0
         }),
         ('AbsOptCMDP C (Middle)', AbsOptCMDPAgent, {
             'features': [0],
