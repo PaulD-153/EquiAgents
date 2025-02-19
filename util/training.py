@@ -7,7 +7,6 @@ import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
 from tqdm import trange
-from agents.multi_agent_env import MultiAgentDifficultCMDPWrapper
 
 from util.mdp import monte_carlo_evaluation
 
@@ -101,7 +100,7 @@ def run_training_episodes(agent, env, number_of_episodes, horizon, eval_episodes
             for t in range(horizon):
                 # Get a list of actions from all agents based on the shared state.
                 # Here, for simplicity, we assume each agent receives the same observation.
-                actions = [agent.act(state[0]) for _ in range(env.num_agents)]
+                actions = [agent.act(state['state']) for _ in range(env.num_agents)]
                 next_state, rewards, done, infos = env.step(actions)
                 # Use the info for this agent (indexed by agent.agent_id) to update action count.
                 # Assume agent.agent_id is the index for this agent.
@@ -109,7 +108,7 @@ def run_training_episodes(agent, env, number_of_episodes, horizon, eval_episodes
                     action_counts += 1
 
                 # Update this agent's transition using its own info.
-                agent.add_transition(state[0], rewards[agent.agent_id], actions[agent.agent_id], next_state[0], done, infos[agent.agent_id])
+                agent.add_transition(state['state'], rewards[agent.agent_id], actions[agent.agent_id], next_state['state'], done, infos[agent.agent_id])
                 episode_return += rewards[agent.agent_id] * discount_factor ** t
                 episode_cost += infos[agent.agent_id].get('cost', 0) * discount_factor ** t
                 state = next_state
@@ -206,22 +205,46 @@ def train_agents(agents, env, number_of_episodes, horizon, seed, out_dir, eval_e
             # Each agent gets the same shared state.
             # Extract the base state from the shared observation
             base_state = state['state']
+            resource = state['resource'][0]
+            print(resource)
+            print(env.num_agents)
+            if resource >= env.num_agents:
+                actions = [agent.act(base_state) for agent in agents]
+            elif resource == env.num_agents - 1:
+                # Get each agent's expected reward (their “bid”)
+                value_estimates = [agent.get_expected_reward(base_state) for agent in agents]
+                # Choose the agent with the highest expected reward
+                best_agent_idx = int(np.argmax(value_estimates))
+                # Choose the second best agent
+                value_estimates[best_agent_idx] = -np.inf
+                second_best_agent_idx = int(np.argmax(value_estimates))
 
-            # Get each agent's expected reward (their “bid”)
-            value_estimates = [agent.get_expected_reward(base_state) for agent in agents]
-
-            # Choose the agent with the highest expected reward
-            best_agent_idx = int(np.argmax(value_estimates))
-            actions = []
-            for i, agent in enumerate(agents):
-                if i == best_agent_idx:
-                    # This agent gets to act—use its computed action.
-                    actions.append(agent.act(base_state))
-                else:
-                    # For agents not selected, send a dummy action (e.g., 0).
-                    actions.append(-1)
-
+                actions = []
+                for i, agent in enumerate(agents):
+                    if i == best_agent_idx:
+                        # This agent gets to act—use its computed action.
+                        actions.append(agent.act(base_state))
+                    elif i == second_best_agent_idx:
+                        actions.append(agent.act(base_state))
+                    else:
+                        # For agents not selected, send a dummy action (e.g., -1).
+                        actions.append(-1)
+            else:
+                # Get each agent's expected reward (their “bid”)
+                value_estimates = [agent.get_expected_reward(base_state) for agent in agents]
+                # Choose the agent with the highest expected reward
+                best_agent_idx = int(np.argmax(value_estimates))
+                actions = []
+                for i, agent in enumerate(agents):
+                    if i == best_agent_idx:
+                        # This agent gets to act—use its computed action.
+                        actions.append(agent.act(base_state))
+                    else:
+                        # For agents not selected, send a dummy action (e.g., 0).
+                        actions.append(-1)
+            print(actions)
             next_state, rewards, done, infos = env.step(actions)
+            print(next_state, rewards, done, infos)
             # Update each agent with its own experience.
             for agent in agents:
                 idx = agent.agent_id
@@ -244,7 +267,7 @@ def train_agents(agents, env, number_of_episodes, horizon, seed, out_dir, eval_e
     # Optionally, export metrics to file.
     return metrics
 
-def run_experiments_batch(env, agents, eval_episodes, number_of_episodes, out_dir, seeds, parallel=True):
+def run_experiments_batch(env, agents, eval_episodes, number_of_episodes, out_dir, seeds, parallel=False):
     experiments = []
     for seed in seeds:
         for (agent_name, agentClass, agent_kwargs) in agents:

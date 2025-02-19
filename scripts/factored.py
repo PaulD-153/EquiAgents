@@ -4,15 +4,17 @@ from agents import OptCMDPAgent
 from agents import AbsOptCMDPAgent
 from util.training import run_experiments_batch
 from agents.multi_agent_env import SharedResourceCMDPWrapper
+import random
 
 def main():
     c = None
-    h = 3
+    h = 25
     number_of_episodes = 1000
     seeds = range(10)
     out_dir = os.path.join('results', os.path.basename(__file__).split('.')[0])
     eval_episodes = 100
-    env = SharedResourceCMDPWrapper(prob_y_zero=0.1, initial_resource=10, capacity_limit=2, num_agents=3, replenishment_rate=2)
+    # Pick replenishment rate between 1 and 3
+    env = SharedResourceCMDPWrapper(num_agents=3, initial_resource=20, capacity_limit=3, max_steps=50, replenishment_rate=3)
 
 
     agents = [

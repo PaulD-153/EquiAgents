@@ -6,7 +6,7 @@ from gym_factored.envs.base import DiscreteEnv
 from planners.abs_lp_optimistic import AbsOptimisticLinearProgrammingPlanner
 from util.mdp import get_mdp_functions
 from util.mdp import get_mdp_functions_partial
-from agents.multi_agent_env import MultiAgentDifficultCMDPWrapper
+from agents.multi_agent_env import SharedResourceCMDPWrapper
 
 np.seterr(invalid='ignore', divide='ignore')
 
@@ -28,7 +28,8 @@ class AbsOptCMDPAgent:
                  verbose=False,
                  reward_scale=1.0,
                  cost_scale=1.0,
-                 agent_id=0):
+                 agent_id=0,
+                 lambda_penalty=0.0):
 
         self.ns, self.na = ns, na
         self.terminal = terminal
@@ -61,6 +62,8 @@ class AbsOptCMDPAgent:
         self.counter_sas = np.zeros((ns, na, ns), dtype=int)
         self.new_counter_sas = np.zeros((ns, na, ns), dtype=int)
         self.acc_reward = np.zeros((ns, na))
+
+        self.lambda_penalty = lambda_penalty
 
         self.solver = solver
         self.planner = self.instantiate_planner()
@@ -104,22 +107,34 @@ class AbsOptCMDPAgent:
         )
 
     @classmethod
-    def from_discrete_env(cls, env: MultiAgentDifficultCMDPWrapper, agent_id=0, **kwargs):
-        """
-        Initializes AbsOptCMDPAgent with the correct agent-specific CMDP view.
-        """
+    def from_discrete_env(cls, env: SharedResourceCMDPWrapper, agent_id=0, **kwargs):
         if hasattr(env, 'envs'):
-            agent_env = env.envs[agent_id]  # Selects the agent's specific environment
+            agent_env = env.envs[agent_id]
+        elif hasattr(env, 'env'):
+            agent_env = env.env
         else:
             agent_env = env
+        print(agent_env)
         transition, reward, _, terminal = get_mdp_functions(agent_env)
-
-        # Forward necessary environment attributes
+        
+        # Save original terminal mask and override it.
+        original_terminal = terminal.copy()
+        terminal = np.zeros_like(terminal, dtype=bool)
+        
+        # For states that were terminal in the base environment,
+        # force a self-loop with probability 1 (and zero reward and cost)
+        for s in range(agent_env.nS):
+            if original_terminal[s]:
+                transition[s, :, :] = 0
+                transition[s, :, s] = 1
+                reward[s, :] = 0
+                # (If you have a cost function, set it to zero here as well.)
+        
         max_reward, min_reward = reward.max(), reward.min()
         abs_transition, abs_reward, abs_cost, abs_terminal, abs_map = get_mdp_functions_partial(agent_env, kwargs.get('features', [0]))
-
-        kwargs.pop('features', None)  # Avoids unexpected argument error
-
+        
+        kwargs.pop('features', None)
+        
         return cls(
             agent_env.nS, agent_env.nA, terminal, agent_env.isd, agent_env,
             max_reward, min_reward, abs_transition, abs_cost, abs_terminal, abs_map, **kwargs, agent_id=agent_id

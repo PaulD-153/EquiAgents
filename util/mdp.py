@@ -23,10 +23,17 @@ def get_mdp_functions(env: DiscreteEnv):
 
 
 def get_transition_with_info(tr: Sequence):
-    if len(tr) == 4:
-        return (*tr, {})
+    if len(tr) == 5:
+        return tr  # already has probability, next_state, reward, done, info
+    elif len(tr) == 3:
+        # For the simplified environment: assume done is False and info is an empty dict.
+        return (tr[0], tr[1], tr[2], False, {})
+    elif len(tr) == 4:
+        # If only 4 elements are provided, assume the last is info and done is False.
+        return (tr[0], tr[1], tr[2], False, tr[3])
     else:
-        return (*tr,)
+        raise ValueError("Unexpected transition tuple length: {}".format(len(tr)))
+
 
 
 def get_mdp_functions_partial(env: DiscreteEnv, features: Sequence):
