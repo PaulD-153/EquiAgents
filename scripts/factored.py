@@ -24,8 +24,8 @@ def main():
             'horizon': h,
             'policy_type': 'ground',
             'agent_id': 0,
-            'reward_scale': 100,
-            'cost_scale': 0.5
+            'reward_scale': 1,
+            'cost_scale': 1
         }),
         ('AbsOptCMDP B (Underserved)', AbsOptCMDPAgent, {
             'features': [0],
@@ -42,12 +42,12 @@ def main():
             'horizon': h,
             'policy_type': 'ground',
             'agent_id': 2,
-            'reward_scale': 1.0,
+            'reward_scale': 100,
             'cost_scale': 1.0
         }),
     ]
 
-    run_experiments_batch(env, agents, eval_episodes, number_of_episodes, out_dir, seeds)
+    run_experiments_batch(env, agents, eval_episodes, number_of_episodes, out_dir, seeds, fair_metrics=True)
 
 
 if __name__ == '__main__':

@@ -8,6 +8,7 @@ import pandas as pd
 from matplotlib import pyplot as plt
 from tqdm import trange
 
+from agents.abs_opt_cmdp import AbsOptCMDPAgent
 from util.mdp import monte_carlo_evaluation
 
 
@@ -24,7 +25,11 @@ def train_agent(agent, env, number_of_episodes, horizon, seed, out_dir=None, eva
     return results
 
 def compute_fairness_metrics(data):
-    allocations = np.array(data["training_returns"])  # Assume training return correlates with allocation
+    agent_0_returns = np.array(data[0]["returns"])
+    agent_1_returns = np.array(data[1]["returns"])
+    agent_2_returns = np.array(data[2]["returns"])
+    # Concatenate all returns
+    allocations = np.concatenate([agent_0_returns, agent_1_returns, agent_2_returns])
     if len(allocations) < 3:
         return None
     
@@ -53,11 +58,14 @@ def save_and_plot(data, out_dir, seed, plot=True, window=100, testing=False):
 def save_and_plot_2(metrics, out_dir, seed):
     # Convert metrics dictionary to a DataFrame.
     data = []
+    fairness_metrics = compute_fairness_metrics(metrics)
     for agent_id, d in metrics.items():
         data.append({
             'agent_id': agent_id,
             'action_count': d['action_count'],
-            'avg_return': np.mean(d['returns'])
+            'avg_return': np.mean(d['returns']),
+            'gini': fairness_metrics['gini'],
+            'max_diff': fairness_metrics['max_diff']
         })
     df = pd.DataFrame(data)
     df.to_csv(os.path.join(out_dir, f'fairness_metrics_{seed}.csv'), index=False)
@@ -169,24 +177,15 @@ def run_training_episodes(agent, env, number_of_episodes, horizon, eval_episodes
     }
     return results
 
-def run_experiment(env, agent_name, agentClass, agent_kwargs, seed,
-                   number_of_episodes, position, out_dir, eval_episodes):
-    # For a shared resource environment, create one agent per agent index,
-    # all sharing the same env.
-    agents = []
+def run_experiment(env, agents, agentClass, agent_kwargs, seed,
+                   number_of_episodes, out_dir, eval_episodes, fair_metrics=False):
     num_agents = env.num_agents  # from the shared wrapper
-    for i in range(num_agents):
-        kwargs_copy = agent_kwargs.copy()
-        kwargs_copy.pop('env', None)  # remove any env key if present
-        kwargs_copy['agent_id'] = i  # assign unique id to each agent
-        agent_i = agentClass.from_discrete_env(env, **kwargs_copy)
-        agents.append(agent_i)
     # Now, run training jointly for all agents.
     # Here, we assume a separate training function for the shared environment.
-    metrics=train_agents(agents, env, number_of_episodes, agents[0].horizon, seed, out_dir, eval_episodes)
+    metrics=train_agents(agents, env, number_of_episodes, agents[0].horizon, seed, out_dir, eval_episodes, fair_metrics=fair_metrics)
     save_and_plot_2(metrics, out_dir, seed)
 
-def train_agents(agents, env, number_of_episodes, horizon, seed, out_dir, eval_episodes):
+def train_agents(agents, env, number_of_episodes, horizon, seed, out_dir, eval_episodes, fair_metrics=False):
     # Initialize metrics per agent.
     metrics = {agent.agent_id: {'action_count': 0, 'returns': []} for agent in agents}
     
@@ -208,40 +207,125 @@ def train_agents(agents, env, number_of_episodes, horizon, seed, out_dir, eval_e
             resource = state['resource'][0]
             print(resource)
             print(env.num_agents)
-            if resource >= env.num_agents:
-                actions = [agent.act(base_state) for agent in agents]
-            elif resource == env.num_agents - 1:
-                # Get each agent's expected reward (their “bid”)
-                value_estimates = [agent.get_expected_reward(base_state) for agent in agents]
-                # Choose the agent with the highest expected reward
-                best_agent_idx = int(np.argmax(value_estimates))
-                # Choose the second best agent
-                value_estimates[best_agent_idx] = -np.inf
-                second_best_agent_idx = int(np.argmax(value_estimates))
 
-                actions = []
-                for i, agent in enumerate(agents):
-                    if i == best_agent_idx:
-                        # This agent gets to act—use its computed action.
-                        actions.append(agent.act(base_state))
-                    elif i == second_best_agent_idx:
-                        actions.append(agent.act(base_state))
-                    else:
-                        # For agents not selected, send a dummy action (e.g., -1).
-                        actions.append(-1)
+            if not fair_metrics:
+                if resource >= env.num_agents:
+                    actions = [agent.act(base_state) for agent in agents]
+                elif resource == env.num_agents - 1:
+                    # Get each agent's expected reward (their “bid”)
+                    value_estimates = [agent.get_expected_reward(base_state) for agent in agents]
+                    # Choose the agent with the highest expected reward
+                    best_agent_idx = int(np.argmax(value_estimates))
+                    # Choose the second best agent
+                    value_estimates[best_agent_idx] = -np.inf
+                    second_best_agent_idx = int(np.argmax(value_estimates))
+
+                    actions = []
+                    for i, agent in enumerate(agents):
+                        if i == best_agent_idx:
+                            # This agent gets to act—use its computed action.
+                            actions.append(agent.act(base_state))
+                        elif i == second_best_agent_idx:
+                            actions.append(agent.act(base_state))
+                        else:
+                            # For agents not selected, send a dummy action (e.g., -1).
+                            actions.append(-1)
+                else:
+                    # Get each agent's expected reward (their “bid”)
+                    value_estimates = [agent.get_expected_reward(base_state) for agent in agents]
+                    # Choose the agent with the highest expected reward
+                    best_agent_idx = int(np.argmax(value_estimates))
+                    actions = []
+                    for i, agent in enumerate(agents):
+                        if i == best_agent_idx:
+                            # This agent gets to act—use its computed action.
+                            actions.append(agent.act(base_state))
+                        else:
+                            # For agents not selected, send a dummy action (e.g., 0).
+                            actions.append(-1)
             else:
-                # Get each agent's expected reward (their “bid”)
-                value_estimates = [agent.get_expected_reward(base_state) for agent in agents]
-                # Choose the agent with the highest expected reward
-                best_agent_idx = int(np.argmax(value_estimates))
-                actions = []
-                for i, agent in enumerate(agents):
-                    if i == best_agent_idx:
-                        # This agent gets to act—use its computed action.
-                        actions.append(agent.act(base_state))
+                # 1) Compute each agent’s “bid” (expected reward) and usage
+                bids = [agent.get_expected_reward(base_state) for agent in agents]
+                usage = [metrics[i]['action_count'] for i in range(env.num_agents)]
+
+                print("Bids:", bids)
+                print("Usage:", usage)
+
+                # 2) Compute the average usage and find who is below α×average
+                alpha = 0.98  # tune this fraction as desired
+                avg_usage = sum(usage) / len(agents)
+                print("Average usage:", avg_usage)
+                below_alpha = [i for i in range(env.num_agents) if usage[i] < alpha * avg_usage]
+                print("Below alpha:", below_alpha)
+                # 3) We must pick these below-alpha agents if possible
+                allowed = set()
+                if len(below_alpha) == 0:
+                    if resource >= env.num_agents:
+                        actions = [agent.act(base_state) for agent in agents]
+                    elif resource == env.num_agents - 1:
+                        # Get each agent's expected reward (their “bid”)
+                        value_estimates = [agent.get_expected_reward(base_state) for agent in agents]
+                        # Choose the agent with the highest expected reward
+                        best_agent_idx = int(np.argmax(value_estimates))
+                        # Choose the second best agent
+                        value_estimates[best_agent_idx] = -np.inf
+                        second_best_agent_idx = int(np.argmax(value_estimates))
+
+                        actions = []
+                        for i, agent in enumerate(agents):
+                            if i == best_agent_idx:
+                                # This agent gets to act—use its computed action.
+                                actions.append(agent.act(base_state))
+                            elif i == second_best_agent_idx:
+                                actions.append(agent.act(base_state))
+                            else:
+                                # For agents not selected, send a dummy action (e.g., -1).
+                                actions.append(-1)
                     else:
-                        # For agents not selected, send a dummy action (e.g., 0).
-                        actions.append(-1)
+                        # Get each agent's expected reward (their “bid”)
+                        value_estimates = [agent.get_expected_reward(base_state) for agent in agents]
+                        # Choose the agent with the highest expected reward
+                        best_agent_idx = int(np.argmax(value_estimates))
+                        actions = []
+                        for i, agent in enumerate(agents):
+                            if i == best_agent_idx:
+                                # This agent gets to act—use its computed action.
+                                actions.append(agent.act(base_state))
+                            else:
+                                # For agents not selected, send a dummy action (e.g., 0).
+                                actions.append(-1)
+                elif resource >= len(below_alpha):
+                    # We can pick all below-alpha agents
+                    allowed.update(below_alpha)
+
+                    leftover = resource - len(below_alpha)
+                    if leftover > 0:
+                        # Fill leftover capacity with the top leftover “bids”
+                        # among the other (non-below-alpha) agents
+                        others = [i for i in range(env.num_agents) if i not in below_alpha]
+                        # Sort by bid ascending, then pick from the top
+                        sorted_others = sorted(others, key=lambda i: bids[i])
+                        print("Leftover:", leftover)
+                        # Check leftover type
+                        best_others = sorted_others[-int(leftover):]
+                        allowed.update(best_others)
+                        print("Best others:", best_others)
+                        print("Allowed:", allowed)
+                        actions = []
+                else:
+                    below_alpha_sorted = sorted(below_alpha, key=lambda i: usage[i])
+                    chosen = below_alpha_sorted[:int(resource)]
+                    allowed.update(chosen)
+                    actions = []
+
+                # 4) Build the action array: allowed agents act, others do -1 (dummy)
+                if len(actions) == 0:
+                    for i, agent in enumerate(agents):
+                        if i in allowed:
+                            actions.append(agent.act(state['state']))
+                        else:
+                            actions.append(-1)  # dummy action
+
             print(actions)
             next_state, rewards, done, infos = env.step(actions)
             print(next_state, rewards, done, infos)
@@ -267,18 +351,31 @@ def train_agents(agents, env, number_of_episodes, horizon, seed, out_dir, eval_e
     # Optionally, export metrics to file.
     return metrics
 
-def run_experiments_batch(env, agents, eval_episodes, number_of_episodes, out_dir, seeds, parallel=False):
+def run_experiments_batch(env, agents, eval_episodes, number_of_episodes, out_dir, seeds, parallel=False, fair_metrics=False):
     experiments = []
-    for seed in seeds:
-        for (agent_name, agentClass, agent_kwargs) in agents:
-            position = len(experiments)
-            x = (env, agent_name, agentClass, agent_kwargs, seed, number_of_episodes,
-                 position, out_dir, eval_episodes)
-            experiments.append(x)
-            print(x)
+    agent_A_pre = agents[0]
+    agent_B_pre = agents[1]
+    agent_C_pre = agents[2]
+    first_agent_dict = agent_A_pre[2]
+    second_agent_dict = agent_B_pre[2]
+    third_agent_dict = agent_C_pre[2]
+
+    agent_A = AbsOptCMDPAgent.from_discrete_env(env, agent_id=first_agent_dict['agent_id'], features=first_agent_dict['features'],
+                     cost_bound=first_agent_dict['cost_bound'], horizon=first_agent_dict['horizon'], policy_type=first_agent_dict['policy_type'],
+                     reward_scale=first_agent_dict['reward_scale'], cost_scale=first_agent_dict['cost_scale'])
+    agent_B = AbsOptCMDPAgent.from_discrete_env(env, agent_id=second_agent_dict['agent_id'], features=second_agent_dict['features'],
+                     cost_bound=second_agent_dict['cost_bound'], horizon=second_agent_dict['horizon'], policy_type=second_agent_dict['policy_type'],
+                     reward_scale=second_agent_dict['reward_scale'], cost_scale=second_agent_dict['cost_scale'])
+    agent_C = AbsOptCMDPAgent.from_discrete_env(env, agent_id=third_agent_dict['agent_id'], features=third_agent_dict['features'],
+                     cost_bound=third_agent_dict['cost_bound'], horizon=third_agent_dict['horizon'], policy_type=third_agent_dict['policy_type'],
+                     reward_scale=third_agent_dict['reward_scale'], cost_scale=third_agent_dict['cost_scale'])
+    agents = [agent_A, agent_B, agent_C]
+
+    experiments.append(agents)
+    print(agents)
     if parallel:
         with Pool() as pool:
             pool.starmap(run_experiment, experiments)
     else:
-        for e in experiments:
-            run_experiment(*e)
+        run_experiment(env, agents, agent_A_pre[1], agent_A_pre[2], seeds[0],
+                   number_of_episodes, out_dir, eval_episodes, fair_metrics=fair_metrics)
