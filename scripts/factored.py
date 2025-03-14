@@ -1,53 +1,55 @@
 import os
 
-from agents import OptCMDPAgent
 from agents import AbsOptCMDPAgent
 from util.training import run_experiments_batch
-from agents.multi_agent_env import SharedResourceCMDPWrapper
-import random
+from env.multi_agent_env import MultiAgentEnv
 
 def main():
     c = None
-    h = 25
-    number_of_episodes = 1000
-    seeds = range(10)
+    h = 5
+    number_of_episodes = 250
+    seeds = range(5)
     out_dir = os.path.join('results', os.path.basename(__file__).split('.')[0])
     eval_episodes = 100
+    # Example: Define resource types and their available resources.
+    resource_pool = {
+        'A': ['A1', 'A2', 'A3', 'A4', 'A5'],
+        'B': ['B1', 'B2', 'B3'],
+        'C': ['C1', 'C2', 'C3', 'C4']
+}
+
     # Pick replenishment rate between 1 and 3
-    env = SharedResourceCMDPWrapper(num_agents=3, initial_resource=20, capacity_limit=3, max_steps=50, replenishment_rate=3)
+    env = MultiAgentEnv(num_agents=3, max_steps=50, nS=h, resource_pool=resource_pool)
 
 
     agents = [
-        ('AbsOptCMDP A (Greedy)', AbsOptCMDPAgent, {
-            'features': [0],
-            'cost_bound': c,
-            'horizon': h,
-            'policy_type': 'ground',
+        ('LP Agent A', AbsOptCMDPAgent, {
             'agent_id': 0,
+            'agent_type': 'A',
+            'horizon': h,
             'reward_scale': 1,
-            'cost_scale': 1
-        }),
-        ('AbsOptCMDP B (Underserved)', AbsOptCMDPAgent, {
-            'features': [0],
+            'cost_scale': 1,
             'cost_bound': c,
-            'horizon': h,
-            'policy_type': 'ground',
+        }),
+        ('LP Agent B', AbsOptCMDPAgent, {
             'agent_id': 1,
-            'reward_scale': 0.5,
-            'cost_scale': 2.0
-        }),
-        ('AbsOptCMDP C (Middle)', AbsOptCMDPAgent, {
-            'features': [0],
-            'cost_bound': c,
+            'agent_type': 'B',
             'horizon': h,
-            'policy_type': 'ground',
+            'reward_scale': 1,
+            'cost_scale': 1,
+            'cost_bound': c,
+        }),
+        ('LP Agent C', AbsOptCMDPAgent, {
             'agent_id': 2,
-            'reward_scale': 100,
-            'cost_scale': 1.0
+            'agent_type': 'C',
+            'horizon': h,
+            'reward_scale': 1,
+            'cost_scale': 1,
+            'cost_bound': c,
         }),
     ]
 
-    run_experiments_batch(env, agents, eval_episodes, number_of_episodes, out_dir, seeds, fair_metrics=True)
+    run_experiments_batch(env, agents, eval_episodes, number_of_episodes, out_dir, seeds, fair_metrics=False)
 
 
 if __name__ == '__main__':
