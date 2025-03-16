@@ -1,8 +1,6 @@
 import os
 from multiprocessing import Pool
 
-import gym
-
 import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
@@ -11,184 +9,110 @@ from tqdm import trange
 from util.mdp import monte_carlo_evaluation
 
 
-def train_agent(agent, env, number_of_episodes, horizon, seed, out_dir=None, eval_episodes=10, discount_factor=1,
-                label='', position=0, verbose=True):
-    env.seed(seed)
-    env.reset()
-    agent.seed(seed)
-    np.random.seed(seed)
-    results = run_training_episodes(agent, env, number_of_episodes, horizon, eval_episodes, discount_factor,
-                                    label, position, verbose=verbose)
-    if out_dir is not None:
-        save_and_plot(results, out_dir, seed)
-    return results
-
 def compute_fairness_metrics(data):
-    allocations = np.array(data["training_returns"])  # Assume training return correlates with allocation
-    if len(allocations) < 3:
-        return None
-    
-    gini_coefficient = np.abs(np.subtract.outer(allocations, allocations)).sum() / (2 * len(allocations) * allocations.sum())
-    max_diff = max(allocations) - min(allocations)
-    return {"gini": gini_coefficient, "max_diff": max_diff}
+    # Calculate the Gini coefficient and other fairness metrics.
+    pass
 
-def save_and_plot(data, out_dir, seed, plot=True, window=100, testing=False):
-    fairness_metrics = compute_fairness_metrics(data)
-    if fairness_metrics:
-        print(f"Fairness at seed {seed}: Gini {fairness_metrics['gini']:.3f}, Max Difference {fairness_metrics['max_diff']:.3f}")
-    
+def save_and_plot(data, moves, out_dir, seed, plot=True, window=25, testing=False):
+    # Ensure the output directory exists.
     os.makedirs(out_dir, exist_ok=True)
-    df = pd.DataFrame(data)
-    df["Gini"] = fairness_metrics["gini"]
-    df["Max Difference"] = fairness_metrics["max_diff"]
-    df.to_csv(os.path.join(out_dir, f'results_{seed}.csv'))
+
+    # Save detailed moves to CSV.
+    moves_df = pd.DataFrame(moves)
+    moves_csv = os.path.join(out_dir, f'moves_{seed}.csv')
+    moves_df.to_csv(moves_csv, index=False)
+    print(f"Info data saved to {moves_csv}")
+
+    # Save the raw data to CSV.
+    # Here we flatten the nested data: outer key = agent id, inner keys = metric names.
+    flat_data = []
+    for agent_id, metrics in data.items():
+        # Add a column for agent id.
+        df_agent = pd.DataFrame(metrics)
+        df_agent.insert(0, 'agent_id', agent_id)
+        flat_data.append(df_agent)
+    data_df = pd.concat(flat_data, ignore_index=True)
+    data_csv = os.path.join(out_dir, f'data_{seed}.csv')
+    data_df.to_csv(data_csv, index=False)
+    print(f"Raw data saved to {data_csv}")
+
+    # Compute summary statistics per agent for each metric.
+    # We will create a nested dictionary where the outer key is the agent id,
+    # and the inner key is the metric name.
+    summary_stats = {}
+    for agent_id, metrics in data.items():
+        summary_stats[agent_id] = {}
+        for key, values in metrics.items():
+            try:
+                arr = np.array(values, dtype=float)
+                summary_stats[agent_id][key] = {
+                    'mean': np.mean(arr),
+                    'std': np.std(arr),
+                    'min': np.min(arr),
+                    'max': np.max(arr),
+                    'median': np.median(arr)
+                }
+            except Exception as e:
+                print(f"Error processing agent {agent_id}, metric {key}: {e}")
     
+    # Convert nested dictionary to a DataFrame.
+    # We'll create one row per agent-metric combination.
+    summary_list = []
+    for agent_id, metrics in summary_stats.items():
+        for metric, stats in metrics.items():
+            stats['agent_id'] = agent_id
+            stats['metric'] = metric
+            summary_list.append(stats)
+    summary_df = pd.DataFrame(summary_list)
+    summary_csv = os.path.join(out_dir, f'summary_{seed}.csv')
+    summary_df.to_csv(summary_csv, index=False)
+    print(f"Summary statistics saved to {summary_csv}")
+
+    # Create plots for each agent and each metric if plotting is enabled.
     if plot:
-        plt.figure()
-        plt.plot(df["training_returns"], label="Training Returns")
-        plt.plot(df["Gini"], label="Gini Coefficient")
-        plt.legend()
-        plt.savefig(os.path.join(out_dir, f'fairness_{seed}.png'))
+        for agent_id, metrics in data.items():
+            for key, values in metrics.items():
+                try:
+                    arr = np.array(values, dtype=float)
+                    plt.figure(figsize=(8, 4))
+                    plt.plot(arr, label=f'Agent {agent_id} {key}', alpha=0.7)
+                    # Compute and plot the rolling mean if enough data exists.
+                    if len(arr) >= window:
+                        rolling_mean = pd.Series(arr).rolling(window=window).mean()
+                        plt.plot(rolling_mean, label=f'Agent {agent_id} {key} (rolling mean, w={window})', linestyle='--')
+                    plt.xlabel('Episode')
+                    plt.ylabel(key)
+                    plt.title(f'Agent {agent_id} {key} over Episodes (Seed {seed})')
+                    plt.legend()
+                    plot_file = os.path.join(out_dir, f'{key}_agent{agent_id}_seed{seed}.png')
+                    plt.savefig(plot_file)
+                    plt.close()
+                    print(f"Plot for Agent {agent_id} {key} saved to {plot_file}")
+                except Exception as e:
+                    print(f"Error plotting Agent {agent_id} metric {key}: {e}")
 
-def save_and_plot_2(metrics, out_dir, seed):
-    # Convert metrics dictionary to a DataFrame.
-    data = []
-    for agent_id, d in metrics.items():
-        data.append({
-            'agent_id': agent_id,
-            'action_count': d['action_count'],
-            'avg_return': np.mean(d['returns'])
-        })
-    df = pd.DataFrame(data)
-    df.to_csv(os.path.join(out_dir, f'fairness_metrics_{seed}.csv'), index=False)
-    # Plot a bar chart of action counts
-    plt.figure()
-    plt.bar(df['agent_id'], df['action_count'])
-    plt.xlabel("Agent ID")
-    plt.ylabel("Action Count")
-    plt.title("Number of Actions Executed per Agent")
-    plt.savefig(os.path.join(out_dir, f'agent_action_counts_{seed}.png'))
+    print(f"All outputs saved to {out_dir}")
 
-def run_training_episodes(agent, env, number_of_episodes, horizon, eval_episodes=1, discount_factor=1, label='', position=0,
-                          log_freq=10, verbose=False, out_dir=None, seed=None):
-    training_returns = []
-    training_costs = []
-    training_length = []
-    training_fails = []
-    evaluation_returns = []
-    evaluation_costs = []
-    evaluation_length = []
-    evaluation_fail = []
-    # New metric: count the number of times the agent got to act.
-    action_counts = 0  
-    desc = "training {}".format(label)
 
-    with trange(number_of_episodes, desc=desc, unit="episode", position=position, disable=not verbose) as progress_bar:
-        for i in progress_bar:
-            state = env.reset()  # shared env returns a tuple of observations
-            # Reset the planner's time step for this agent.
-            if hasattr(agent.planner, 'reset_time_step'):
-                agent.planner.reset_time_step()
-            else:
-                agent.planner.time_step = 0
+def run_experiment(env, agents, seed,
+                   number_of_episodes, out_dir, eval_episodes, fair_metrics=False):
+    # Print agent names
+    print("Running experiment with agents:", [agent.agent_id for agent in agents])
+    metrics, moves = train_agents(agents, env, number_of_episodes, agents[0].horizon, seed, out_dir, fair_metrics=fair_metrics)
+    save_and_plot(metrics, moves, out_dir, seed)
 
-            episode_return = 0
-            episode_cost = 0
-            fail = 0
-            steps = 0
-            
-            for t in range(horizon):
-                # Get a list of actions from all agents based on the shared state.
-                # Here, for simplicity, we assume each agent receives the same observation.
-                actions = [agent.act(state['state']) for _ in range(env.num_agents)]
-                next_state, rewards, done, infos = env.step(actions)
-                # Use the info for this agent (indexed by agent.agent_id) to update action count.
-                # Assume agent.agent_id is the index for this agent.
-                if infos[agent.agent_id].get('acted', False):
-                    action_counts += 1
+    # Now run evaluation on the learned policy
+    eval_returns, eval_costs, eval_length = monte_carlo_evaluation(
+        env, agents, agents[0].horizon, discount_factor=1, number_of_episodes=eval_episodes, verbose=True
+    )
+    print(f"Evaluation results: Return={eval_returns}, Cost={eval_costs}, Length={eval_length}")
 
-                # Update this agent's transition using its own info.
-                agent.add_transition(state['state'], rewards[agent.agent_id], actions[agent.agent_id], next_state['state'], done, infos[agent.agent_id])
-                episode_return += rewards[agent.agent_id] * discount_factor ** t
-                episode_cost += infos[agent.agent_id].get('cost', 0) * discount_factor ** t
-                state = next_state
-                steps += 1
-                if done:
-                    if infos[agent.agent_id].get('fail', False):
-                        fail = 1
-                    break
-            
-            agent.end_episode()
-            training_returns.append(episode_return)
-            training_costs.append(episode_cost)
-            training_length.append(steps)
-            training_fails.append(fail)
-            
-            # Optionally, accumulate per-episode action count (or average over episodes)
-            # Here we simply print the action count for this agent.
-            progress_bar.set_postfix(action_count=action_counts)
-            
-            if eval_episodes > 0:
-                evaluation = monte_carlo_evaluation(env, agent, agent.horizon, discount_factor, eval_episodes)
-                evaluation_returns.append(evaluation[0])
-                evaluation_costs.append(evaluation[1])
-                evaluation_length.append(evaluation[2])
-                evaluation_fail.append(evaluation[3])
-            
-            if not (i % log_freq):
-                progress_bar.set_postfix(
-                    t_ret=np.mean(training_returns[-log_freq:]),
-                    t_cost=np.mean(training_costs[-log_freq:]),
-                    e_ret=np.mean(evaluation_returns[-log_freq:]),
-                    e_cost=np.mean(evaluation_costs[-log_freq:]),
-                    act_count=action_counts
-                )
-                if out_dir is not None:
-                    save_and_plot({
-                        "training_returns": training_returns,
-                        "training_costs": training_costs,
-                        "training_length": training_length,
-                        "training_fail": training_fails,
-                        "evaluation_returns": evaluation_returns,
-                        "evaluation_costs": evaluation_costs,
-                        "evaluation_length": evaluation_length,
-                        "evaluation_fail": evaluation_fail,
-                        "action_counts": action_counts
-                    }, out_dir, seed, plot=False)
-
-    results = {
-        "training_returns": training_returns,
-        "training_costs": training_costs,
-        "training_length": training_length,
-        "training_fail": training_fails,
-        "evaluation_returns": evaluation_returns,
-        "evaluation_costs": evaluation_costs,
-        "evaluation_length": evaluation_length,
-        "evaluation_fail": evaluation_fail,
-        "action_counts": action_counts
-    }
-    return results
-
-def run_experiment(env, agent_name, agentClass, agent_kwargs, seed,
-                   number_of_episodes, position, out_dir, eval_episodes):
-    # For a shared resource environment, create one agent per agent index,
-    # all sharing the same env.
-    agents = []
-    num_agents = env.num_agents  # from the shared wrapper
-    for i in range(num_agents):
-        kwargs_copy = agent_kwargs.copy()
-        kwargs_copy.pop('env', None)  # remove any env key if present
-        kwargs_copy['agent_id'] = i  # assign unique id to each agent
-        agent_i = agentClass.from_discrete_env(env, **kwargs_copy)
-        agents.append(agent_i)
-    # Now, run training jointly for all agents.
-    # Here, we assume a separate training function for the shared environment.
-    metrics=train_agents(agents, env, number_of_episodes, agents[0].horizon, seed, out_dir, eval_episodes)
-    save_and_plot_2(metrics, out_dir, seed)
-
-def train_agents(agents, env, number_of_episodes, horizon, seed, out_dir, eval_episodes):
+def train_agents(agents, env, number_of_episodes, horizon, seed, out_dir, fair_metrics=False):
     # Initialize metrics per agent.
-    metrics = {agent.agent_id: {'action_count': 0, 'returns': []} for agent in agents}
+    metrics = {agent.agent_id: {'returns': []} for agent in agents}
+    moves = {agent.agent_id: {'moves': []} for agent in agents}
+    env.agent_types = [agent.agent_type for agent in agents]
+
     
     for episode in range(number_of_episodes):
         state = env.reset()  # shared observation
@@ -205,77 +129,51 @@ def train_agents(agents, env, number_of_episodes, horizon, seed, out_dir, eval_e
             # Each agent gets the same shared state.
             # Extract the base state from the shared observation
             base_state = state['state']
-            resource = state['resource'][0]
-            print(resource)
-            print(env.num_agents)
-            if resource >= env.num_agents:
-                actions = [agent.act(base_state) for agent in agents]
-            elif resource == env.num_agents - 1:
-                # Get each agent's expected reward (their “bid”)
-                value_estimates = [agent.get_expected_reward(base_state) for agent in agents]
-                # Choose the agent with the highest expected reward
-                best_agent_idx = int(np.argmax(value_estimates))
-                # Choose the second best agent
-                value_estimates[best_agent_idx] = -np.inf
-                second_best_agent_idx = int(np.argmax(value_estimates))
+            
+            actions = [agent.act(base_state) for agent in agents]
 
-                actions = []
-                for i, agent in enumerate(agents):
-                    if i == best_agent_idx:
-                        # This agent gets to act—use its computed action.
-                        actions.append(agent.act(base_state))
-                    elif i == second_best_agent_idx:
-                        actions.append(agent.act(base_state))
-                    else:
-                        # For agents not selected, send a dummy action (e.g., -1).
-                        actions.append(-1)
-            else:
-                # Get each agent's expected reward (their “bid”)
-                value_estimates = [agent.get_expected_reward(base_state) for agent in agents]
-                # Choose the agent with the highest expected reward
-                best_agent_idx = int(np.argmax(value_estimates))
-                actions = []
-                for i, agent in enumerate(agents):
-                    if i == best_agent_idx:
-                        # This agent gets to act—use its computed action.
-                        actions.append(agent.act(base_state))
-                    else:
-                        # For agents not selected, send a dummy action (e.g., 0).
-                        actions.append(-1)
-            print(actions)
             next_state, rewards, done, infos = env.step(actions)
-            print(next_state, rewards, done, infos)
+
             # Update each agent with its own experience.
             for agent in agents:
                 idx = agent.agent_id
                 agent.add_transition(state['state'], rewards[idx], actions[idx], next_state['state'], done, infos[idx])
                 episode_returns[idx] += rewards[idx]  # You can incorporate discounting as needed.
-                if infos[idx].get('acted', False):
-                    metrics[idx]['action_count'] += 1
+
             state = next_state
             if done:
                 break
         
         for agent in agents:
+            moves[agent.agent_id]['moves'].append(agent.visited_resources)
             agent.end_episode()
             metrics[agent.agent_id]['returns'].append(episode_returns[agent.agent_id])
-    
-    # Save or print fairness metrics.
-    for agent_id, data in metrics.items():
-        print(f"Agent {agent_id} acted {data['action_count']} times over {number_of_episodes} episodes. Average return: {np.mean(data['returns'])}")
+
+            
     
     # Optionally, export metrics to file.
-    return metrics
+    return metrics, moves
 
-def run_experiments_batch(env, agents, eval_episodes, number_of_episodes, out_dir, seeds, parallel=False):
+def run_experiments_batch(env, agents_specs, eval_episodes, number_of_episodes, out_dir, seeds, parallel=False, fair_metrics=False):
+    """
+    agents_specs: a list of tuples (agent_name, agentClass, agent_kwargs)
+    Instead of looping over each agent spec individually, we will build all agents
+    for a given seed and run one experiment.
+    """
     experiments = []
     for seed in seeds:
-        for (agent_name, agentClass, agent_kwargs) in agents:
-            position = len(experiments)
-            x = (env, agent_name, agentClass, agent_kwargs, seed, number_of_episodes,
-                 position, out_dir, eval_episodes)
-            experiments.append(x)
-            print(x)
+        # For each seed, build all agents from the provided specifications.
+        experiment_agents = []
+        for (agent_name, agentClass, agent_kwargs) in agents_specs:
+            # Here we assume your agent class provides a from_discrete_env() or similar constructor.
+            agent = agentClass.from_discrete_env(env, **agent_kwargs)
+            experiment_agents.append(agent)
+        # Append a single experiment tuple with the list of agents.
+        position = len(experiments)
+        x = (env, experiment_agents, seed, number_of_episodes, out_dir, eval_episodes)
+        experiments.append(x)
+        print(x)
+        
     if parallel:
         with Pool() as pool:
             pool.starmap(run_experiment, experiments)

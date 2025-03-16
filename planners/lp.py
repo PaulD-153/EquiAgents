@@ -76,8 +76,10 @@ class LinearProgrammingPlanner:
             raise ValueError(f"Policy distribution is invalid: {probabilities}")
         if probabilities.ndim != 1:
             raise ValueError(f"Policy probabilities must be 1D, got shape {probabilities.shape}")
+
         action = self.rng.choice(self.actions, size=1, p=probabilities)[0]
         self.time_step += 1
+
         return action
 
     def add_transition(self, state, reward, action, next_state, done, info=None):
@@ -167,9 +169,12 @@ class LinearProgrammingPlanner:
                     # outflow == inflow
                     cv.sum(self.x[h][s]) == cv.sum(cv.multiply(self.x[h - 1], self.transition[:, :, s]))
                     for s in self.non_terminal_states
-                ] + [
-                   cv.sum(self.x[h][self.terminal_states], axis=1) == 0
                 ]
+                # Only add terminal constraints if there are terminal states
+                if len(self.terminal_states) > 0:
+                    constraints += [
+                    cv.sum(self.x[h][self.terminal_states], axis=1) == 0
+                    ]
         else:
             constraints = []
         if self.cost_bound is not None:
