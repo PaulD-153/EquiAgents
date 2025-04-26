@@ -1,3 +1,8 @@
+"""
+This script contains the LinearProgrammingPlanner class, which implements a linear programming approach to solve constrained Markov decision processes (CMDPs).
+Constraints can be added to the problem, and the class supports both Gurobi and CVXPY solvers.
+"""
+
 import time
 import numpy as np
 import cvxpy as cv

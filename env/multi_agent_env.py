@@ -1,3 +1,10 @@
+"""
+This script contains the MultiAgentEnv class, which defines a custom multi-agent environment for reinforcement learning.
+It includes methods for resetting the environment, stepping through it, and rendering the current state. 
+The environment is designed to simulate a scenario where multiple agents interact with a shared resource pool, and their actions affect the state and rewards they receive.
+Rewards are defined in this script.
+"""
+
 import numpy as np
 import gym
 import random

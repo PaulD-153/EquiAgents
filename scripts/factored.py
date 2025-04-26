@@ -1,3 +1,10 @@
+"""
+This script sets up a multi-agent environment with a specified number of agents and runs experiments using the AbsOptCMDPAgent class.
+It generates agent specifications, initializes the environment, and runs the experiments.
+"""
+
+
+
 import os
 
 from agents import AbsOptCMDPAgent
@@ -32,7 +39,8 @@ def generate_agent_specs(agent_class, num_agents, base_params, default_types=Non
 def main():
     c = None
     horizon = 5
-    num_episodes = 250
+    num_episodes = 5
+    num_agents = 5
     seeds = range(5)
     out_dir = os.path.join('results', os.path.basename(__file__).split('.')[0])
     eval_episodes = 100
@@ -44,7 +52,7 @@ def main():
 }
 
     # Create the environment; here, nS is set to the horizon if you want one state per timestep.
-    env = MultiAgentEnv(num_agents=50, max_steps=50, nS=horizon, resource_pool=resource_pool)
+    env = MultiAgentEnv(num_agents=num_agents, max_steps=50, nS=horizon, resource_pool=resource_pool)
     
     # Set base parameters common to all agents.
     base_params = {
@@ -55,7 +63,7 @@ def main():
     }
     
     # Generate specs for 50 agents.
-    agents_specs = generate_agent_specs(AbsOptCMDPAgent, num_agents=50, base_params=base_params)
+    agents_specs = generate_agent_specs(AbsOptCMDPAgent, num_agents=num_agents, base_params=base_params)
     
     # Run experiments using the generated agent specs.
     run_experiments_batch(env, agents_specs, eval_episodes, num_episodes, out_dir, seeds, fair_metrics=False)

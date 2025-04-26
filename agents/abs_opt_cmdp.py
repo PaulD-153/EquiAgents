@@ -1,3 +1,8 @@
+"""
+This script contains the class definition for the AbsOptCMDPAgent, which implements a multi-agent reinforcement learning agent using linear programming for planning.
+It includes methods for action selection, transition updates, and episode management.
+"""
+
 import numpy as np
 
 from planners.lp import LinearProgrammingPlanner

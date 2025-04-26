@@ -1,3 +1,8 @@
+"""
+This script contains the training and evaluation functions for multi-agent environments.
+It includes functions to save and plot metrics, run experiments, and train agents using Monte Carlo methods.
+"""
+
 import os
 from multiprocessing import Pool
 
@@ -145,6 +150,7 @@ def train_agents(agents, env, number_of_episodes, horizon, seed, out_dir, fair_m
                 break
         
         for agent in agents:
+            print(f"Agent {agent.agent_id} finished episode {episode + 1}/{number_of_episodes} with return {episode_returns[agent.agent_id]}")
             moves[agent.agent_id]['moves'].append(agent.visited_resources)
             agent.end_episode()
             metrics[agent.agent_id]['returns'].append(episode_returns[agent.agent_id])
