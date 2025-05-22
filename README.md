@@ -1,5 +1,6 @@
-factored.py:
 
+factored.py:
+```python
 Define main():
     Set problem parameters:
         - planning horizon
@@ -55,9 +56,10 @@ Define main():
 
 If file is executed directly:
     Call main()
+```
 
 training.py:
-
+```python
 define plot_all_metrics(metrics, seed, ...)
 
 Create output directory
@@ -151,9 +153,10 @@ After all episodes:
     Plot metrics
 
 Return collected metrics
+```
 
 master_problem.py:
-
+```python
 Class MasterProblem:
     Constructor(agents, resource_capacity, fairness=False, fairness_constraint=False, langrangian=False, langrangian_weight=1.0):
         Set self.agents, self.resource_capacity, self.horizon, self.num_agents
@@ -234,10 +237,10 @@ Class MasterProblem:
             Extract .value from each var
             Normalize into a probability distribution
         Return list of distributions (one per agent)
-
+```
 
 abs_opt_cmdp.py:
-
+```python
 Class DecentralizedAgentWithColumns:
 
     Constructor(agent_id, horizon, resource_capacity, num_columns, verbose, reward_profile, cost_profile):
@@ -309,9 +312,10 @@ Class DecentralizedAgentWithColumns:
 
     Method reset():
         Clear columns and selected_plan
+```
 
 resource_mdp_env.py:
-
+```python
 Class ResourceMDPEnv (inherits from gym.Env):
 
     Constructor(n_agents, resource_capacity=1, max_steps=5, reward_profile=None):
@@ -344,3 +348,4 @@ Class ResourceMDPEnv (inherits from gym.Env):
 
     Method render(mode='human'):
         Print current timestep, usage_vector, and last_claims
+```
