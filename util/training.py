@@ -1,188 +1,189 @@
-"""
-This script contains the training and evaluation functions for multi-agent environments.
-It includes functions to save and plot metrics, run experiments, and train agents using Monte Carlo methods.
-"""
-
 import os
-from multiprocessing import Pool
-
 import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
 from tqdm import trange
+from planners.master_problem import MasterProblem
 
-from util.mdp import monte_carlo_evaluation
 
 
-def compute_fairness_metrics(data):
-    # Calculate the Gini coefficient and other fairness metrics.
-    pass
-
-def save_and_plot(data, moves, out_dir, seed, plot=True, window=25, testing=False):
-    # Ensure the output directory exists.
+def plot_all_metrics(metrics, seed, out_dir='plots', window=5, fairness=False, langrangian=False, fair_constraint=False):
     os.makedirs(out_dir, exist_ok=True)
 
-    # Save detailed moves to CSV.
-    moves_df = pd.DataFrame(moves)
-    moves_csv = os.path.join(out_dir, f'moves_{seed}.csv')
-    moves_df.to_csv(moves_csv, index=False)
-    print(f"Info data saved to {moves_csv}")
-
-    # Save the raw data to CSV.
-    # Here we flatten the nested data: outer key = agent id, inner keys = metric names.
-    flat_data = []
-    for agent_id, metrics in data.items():
-        # Add a column for agent id.
-        df_agent = pd.DataFrame(metrics)
-        df_agent.insert(0, 'agent_id', agent_id)
-        flat_data.append(df_agent)
-    data_df = pd.concat(flat_data, ignore_index=True)
-    data_csv = os.path.join(out_dir, f'data_{seed}.csv')
-    data_df.to_csv(data_csv, index=False)
-    print(f"Raw data saved to {data_csv}")
-
-    # Compute summary statistics per agent for each metric.
-    # We will create a nested dictionary where the outer key is the agent id,
-    # and the inner key is the metric name.
-    summary_stats = {}
-    for agent_id, metrics in data.items():
-        summary_stats[agent_id] = {}
-        for key, values in metrics.items():
-            try:
-                arr = np.array(values, dtype=float)
-                summary_stats[agent_id][key] = {
-                    'mean': np.mean(arr),
-                    'std': np.std(arr),
-                    'min': np.min(arr),
-                    'max': np.max(arr),
-                    'median': np.median(arr)
-                }
-            except Exception as e:
-                print(f"Error processing agent {agent_id}, metric {key}: {e}")
-    
-    # Convert nested dictionary to a DataFrame.
-    # We'll create one row per agent-metric combination.
-    summary_list = []
-    for agent_id, metrics in summary_stats.items():
-        for metric, stats in metrics.items():
-            stats['agent_id'] = agent_id
-            stats['metric'] = metric
-            summary_list.append(stats)
-    summary_df = pd.DataFrame(summary_list)
-    summary_csv = os.path.join(out_dir, f'summary_{seed}.csv')
-    summary_df.to_csv(summary_csv, index=False)
-    print(f"Summary statistics saved to {summary_csv}")
-
-    # Create plots for each agent and each metric if plotting is enabled.
-    if plot:
-        for agent_id, metrics in data.items():
-            for key, values in metrics.items():
-                try:
-                    arr = np.array(values, dtype=float)
-                    plt.figure(figsize=(8, 4))
-                    plt.plot(arr, label=f'Agent {agent_id} {key}', alpha=0.7)
-                    # Compute and plot the rolling mean if enough data exists.
-                    if len(arr) >= window:
-                        rolling_mean = pd.Series(arr).rolling(window=window).mean()
-                        plt.plot(rolling_mean, label=f'Agent {agent_id} {key} (rolling mean, w={window})', linestyle='--')
-                    plt.xlabel('Episode')
-                    plt.ylabel(key)
-                    plt.title(f'Agent {agent_id} {key} over Episodes (Seed {seed})')
-                    plt.legend()
-                    plot_file = os.path.join(out_dir, f'{key}_agent{agent_id}_seed{seed}.png')
-                    plt.savefig(plot_file)
-                    plt.close()
-                    print(f"Plot for Agent {agent_id} {key} saved to {plot_file}")
-                except Exception as e:
-                    print(f"Error plotting Agent {agent_id} metric {key}: {e}")
-
-    print(f"All outputs saved to {out_dir}")
+    df = pd.DataFrame(metrics)
+    for key in df.columns:
+        plt.figure(figsize=(10, 4))
+        plt.plot(df[key], label='raw', alpha=0.5)
+        if len(df[key]) >= window:
+            smoothed = df[key].rolling(window=window).mean()
+            plt.plot(smoothed, label=f'smoothed (window={window})', linestyle='--')
+        plt.title(f"{key} over Episodes (Seed {seed})")
+        plt.xlabel("Episode")
+        plt.ylabel(key)
+        plt.legend()
+        plt.tight_layout()
+        plt.grid(True)
+        filename = os.path.join(out_dir, f"{key}_seed{seed}(fairness={fairness},langrangian={langrangian},fair_constraint={fair_constraint}).png")
+        plt.savefig(filename)
+        plt.close()
+        print(f"Plot saved to {filename}")
 
 
-def run_experiment(env, agents, seed,
-                   number_of_episodes, out_dir, eval_episodes, fair_metrics=False):
-    # Print agent names
-    print("Running experiment with agents:", [agent.agent_id for agent in agents])
-    metrics, moves = train_agents(agents, env, number_of_episodes, agents[0].horizon, seed, out_dir, fair_metrics=fair_metrics)
-    save_and_plot(metrics, moves, out_dir, seed)
+def jain_index(x):
+    """
+    Computes Jain's Fairness Index for a vector of allocations.
+    """
+    numerator = (np.sum(x)) ** 2
+    denominator = len(x) * np.sum(x ** 2)
+    return numerator / (denominator + 1e-8)
 
-    # Now run evaluation on the learned policy
-    eval_returns, eval_costs, eval_length = monte_carlo_evaluation(
-        env, agents, agents[0].horizon, discount_factor=1, number_of_episodes=eval_episodes, verbose=True
-    )
-    print(f"Evaluation results: Return={eval_returns}, Cost={eval_costs}, Length={eval_length}")
 
-def train_agents(agents, env, number_of_episodes, horizon, seed, out_dir, fair_metrics=False):
-    # Initialize metrics per agent.
-    metrics = {agent.agent_id: {'returns': []} for agent in agents}
-    moves = {agent.agent_id: {'moves': []} for agent in agents}
-    env.agent_types = [agent.agent_type for agent in agents]
+def train_agents_with_dynamic_master(env, agents, number_of_episodes, max_column_generation_rounds=5, verbose=True, fairness=False, fairness_constraint=False, langrangian=False, langrangian_weight=None, seed=None):
+    metrics = {
+        'returns': [], 'fairness': [], 'optimal usage': [],
+        'expected_stepwise_fairness': [], 'actual_stepwise_fairness': []
+    }
+    for agent in agents:
+        agent.reset()   
 
-    
     for episode in range(number_of_episodes):
-        state = env.reset()  # shared observation
-        # Reset each agent's planner time step if needed.
+        env.reset()
+
+        # Step 1: Agents generate initial columns
         for agent in agents:
-            if hasattr(agent.planner, 'reset_time_step'):
-                agent.planner.reset_time_step()
-            else:
-                agent.planner.time_step = 0
-        
-        episode_returns = {agent.agent_id: 0 for agent in agents}
-        
-        for t in range(horizon):
-            # Each agent gets the same shared state.
-            # Extract the base state from the shared observation
-            base_state = state['state']
-            
-            actions = [agent.act(base_state) for agent in agents]
+            agent.columns = agent.generate_candidate_columns()
 
-            next_state, rewards, done, infos = env.step(actions)
+        feasible = False
 
-            # Update each agent with its own experience.
+        round_idx = 0
+        while True:
+            master = MasterProblem(
+                agents,
+                resource_capacity=env.resource_capacity,
+                fairness=fairness,
+                fairness_constraint=fairness_constraint,
+                langrangian=langrangian,
+                langrangian_weight=langrangian_weight
+            )
+            master_value, _ = master.solve()
+
+            if master.lp.status not in ["optimal", "optimal_inaccurate"]:
+                print(f"Master LP not feasible at round {round_idx} (status: {master.lp.status})")
+                break  # Exit if truly infeasible
+
+            # Step 1: Get duals
+            dual_prices = master.get_dual_prices()
+            dual_prices_fairness = master.get_fairness_duals() if fairness_constraint else None
+
+            # Step 2: Generate one best-response column for each agent
+            new_columns = []
             for agent in agents:
-                idx = agent.agent_id
-                agent.add_transition(state['state'], rewards[idx], actions[idx], next_state['state'], done, infos[idx])
-                episode_returns[idx] += rewards[idx]  # You can incorporate discounting as needed.
+                column = agent.generate_best_response_column(dual_prices, dual_prices_fairness)
+                reduced_cost = agent.get_last_column_reduced_cost()
+                new_columns.append((column, reduced_cost))
 
-            state = next_state
-            if done:
+            # Step 3: Check for improving columns with early stopping
+            reduced_costs = [rc for _, rc in new_columns]
+            min_rc = min(reduced_costs)
+            early_stop_threshold = -1e-2 # You can tune this
+            print(f"Round {round_idx}: min reduced cost {min_rc:.6f}")
+            print(f"Round {round_idx}: reduced costs {reduced_costs}")
+            print(f"[Round {round_idx}] Duals: {np.round(dual_prices, 4)}")
+
+            if min_rc > early_stop_threshold:
+                print(f"Early stopping: min reduced cost {min_rc:.6f} is above threshold {early_stop_threshold}.")
+                column_distributions = master.get_decision_distribution()
                 break
-        
-        for agent in agents:
-            print(f"Agent {agent.agent_id} finished episode {episode + 1}/{number_of_episodes} with return {episode_returns[agent.agent_id]}")
-            moves[agent.agent_id]['moves'].append(agent.visited_resources)
-            agent.end_episode()
-            metrics[agent.agent_id]['returns'].append(episode_returns[agent.agent_id])
 
+            if round_idx >= max_column_generation_rounds:
+                print(f"Max column generation rounds reached: {max_column_generation_rounds}.")
+                column_distributions = master.get_decision_distribution()
+                break
+
+
+            # Step 4: Add improving columns
+            for agent, (column, rc) in zip(agents, new_columns):
+                agent.columns.append(column)
+
+            if verbose:
+                for agent_id, agent in enumerate(agents):
+                    print(f"Agent {agent_id} columns now: {len(agent.columns)}")
+                    print(f"Agent {agent_id} reduced cost: {new_columns[agent_id][1]:.4f}")
+                    print(f"Agent {agent_id} dual prices: {dual_prices}")
+                    print(f"Agent {agent_id} columns: {agent.columns}")
             
-    
-    # Optionally, export metrics to file.
-    return metrics, moves
+            round_idx += 1
 
-def run_experiments_batch(env, agents_specs, eval_episodes, number_of_episodes, out_dir, seeds, parallel=False, fair_metrics=False):
-    """
-    agents_specs: a list of tuples (agent_name, agentClass, agent_kwargs)
-    Instead of looping over each agent spec individually, we will build all agents
-    for a given seed and run one experiment.
-    """
-    experiments = []
-    for seed in seeds:
-        # For each seed, build all agents from the provided specifications.
-        experiment_agents = []
-        for (agent_name, agentClass, agent_kwargs) in agents_specs:
-            # Here we assume your agent class provides a from_discrete_env() or similar constructor.
-            agent = agentClass.from_discrete_env(env, **agent_kwargs)
-            experiment_agents.append(agent)
-        # Append a single experiment tuple with the list of agents.
-        position = len(experiments)
-        x = (env, experiment_agents, seed, number_of_episodes, out_dir, eval_episodes)
-        experiments.append(x)
-        print(x)
-        
-    if parallel:
-        with Pool() as pool:
-            pool.starmap(run_experiment, experiments)
-    else:
-        for e in experiments:
-            run_experiment(*e)
+
+        if master.lp.status not in ["optimal", "optimal_inaccurate"]:
+            raise RuntimeError(f"Failed to find feasible solution after {max_column_generation_rounds} rounds.")
+
+        print(f"Episode {episode+1}: Master LP Value = {master_value:.2f}")
+
+        # Step 2: Assign selected plans
+        for agent_id, agent in enumerate(agents):
+            agent.policy_distribution = column_distributions[agent_id]
+
+        # Step 2.5: Compute expected fairness from current policy distributions
+        expected_claims_per_timestep = np.zeros((env.max_steps, len(agents)))
+        for t in range(env.max_steps):
+            for a_idx, agent in enumerate(agents):
+                for i, col in enumerate(agent.columns):
+                    prob = column_distributions[a_idx][i]
+                    expected_claims_per_timestep[t, a_idx] += prob * col["claims"][t]
+
+        expected_fairness = np.mean([
+            jain_index(expected_claims_per_timestep[t]) for t in range(env.max_steps)
+        ])
+        metrics['expected_stepwise_fairness'].append(expected_fairness)
+
+        # Step 3: Simulate episode
+        episode_return = 0
+        agent_rewards = np.zeros(len(agents))
+        agent_claims = np.zeros(len(agents))
+        timestep = 0
+        done = False
+        fairness_per_timestep = []
+        agents_rewards_vectors = []
+
+        while not done:
+            claim_vector = np.zeros(len(agents))
+            for agent_id, agent in enumerate(agents):
+                prob = 0.0
+                for i, column in enumerate(agent.columns):
+                    plan_prob = agent.policy_distribution[i]
+                    plan_value = column["claims"][min(timestep, len(column["claims"]) - 1)]
+                    prob += plan_prob * plan_value
+                claim_vector[agent_id] = float(np.random.rand() < prob)
+
+            fairness_per_timestep.append(jain_index(claim_vector))
+            state, _, done, _ = env.step(claim_vector)  # Ignore env.reward if using internal rewards
+
+            for agent_id, agent in enumerate(agents):
+                timestep_clipped = min(timestep, len(agent.fixed_reward_vector) - 1)
+                reward_this_step = agent.fixed_reward_vector[timestep_clipped] * claim_vector[agent_id]
+                agent_rewards[agent_id] += reward_this_step
+                episode_return += reward_this_step
+                agents_rewards_vectors.append(agent.fixed_reward_vector)
+
+
+            agent_claims += claim_vector
+            timestep += 1
+
+        for agent in agents:
+            agent.end_episode()
+            agent.episode+= 1
+
+        # Step 4: Record metrics
+        fairness_score = jain_index(agent_rewards)
+        optimal_usage_score = np.sum(agent_claims) / (env.resource_capacity * env.max_steps)  # safe division
+
+        metrics['returns'].append(episode_return)
+        metrics['fairness'].append(fairness_score)
+        metrics['optimal usage'].append(optimal_usage_score)
+        metrics['actual_stepwise_fairness'].append(np.mean(fairness_per_timestep))
+
+        print(f"Finished episode {episode+1} with actual return {episode_return:.2f}, fairness {fairness_score:.4f}, optimal usage {optimal_usage_score:.4f}, agent claims: {agent_claims}")
+
+    plot_all_metrics(metrics, seed, fairness=fairness, langrangian=langrangian, fair_constraint=fairness_constraint)
+    return metrics

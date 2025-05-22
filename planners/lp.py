@@ -1,308 +1,111 @@
-"""
-This script contains the LinearProgrammingPlanner class, which implements a linear programming approach to solve constrained Markov decision processes (CMDPs).
-Constraints can be added to the problem, and the class supports both Gurobi and CVXPY solvers.
-"""
-
 import time
 import numpy as np
 import cvxpy as cv
 
-from gym_factored.envs.base import DiscreteEnv
-from util.mdp import get_mdp_functions
-from util.grb import *
-
-
 class LinearProgrammingPlanner:
     def __init__(self,
-                 transition: np.array,
-                 reward: np.array,
-                 cost: np.array,
-                 terminal: np.array,
-                 isd: np.array,
-                 env,
-                 max_reward,
-                 min_reward,
-                 max_cost,
-                 min_cost,
-                 horizon=3,
-                 cost_bound=None,
-                 verbose=False,
-                 solver='cvxpy'):
-        self.transition = transition
-        self.isd = isd  # initial states distribution
-        self.terminal = terminal
-        self.reward = reward
-        if cost is not None:
-            self.cost = cost
-        else:
-            self.cost = np.zeros(shape=self.reward.shape)
-        self.cost_bound = cost_bound
-        self.env = env
-        self.max_reward = max_reward
-        self.min_reward = min_reward
-        self.max_cost = max_cost
-        self.min_cost = min_cost
-
-        self.ns, self.na = reward.shape
+                 transition: np.ndarray,
+                 reward: np.ndarray,
+                 initial_distribution: np.ndarray,
+                 resource_capacity: int,
+                 n_agents: int,
+                 horizon: int = 3,
+                 verbose: bool = False):
+        """
+        reward: shape (n_agents, n_resources, n_resources)
+        transition: (optional) can stay (n_resources, n_resources) if deterministic
+        """
+        self.transition = transition  # shape: (n_resources, n_resources)
+        self.reward = reward  # shape: (n_agents, n_resources, n_resources)
+        self.initial_distribution = initial_distribution  # shape: (n_agents, n_resources)
+        self.resource_capacity = resource_capacity
+        self.n_agents = n_agents
         self.horizon = horizon
-        self.states = np.arange(self.ns)
-        self.terminal_states = np.arange(self.ns)[terminal]
-        self.non_terminal_states = np.arange(self.ns)[~terminal]
-        self.actions = range(self.na)
-        self.rng = np.random.default_rng()
         self.verbose = verbose
-        if solver == 'grb' and GUROBI_FOUND:
-            self.solver = 'grb'
-        else:
-            self.solver = 'cvxpy'
 
-        self.policy = np.zeros(shape=(self.horizon, self.ns, self.na))
-
+        self.n_resources = transition.shape[0]
+        self.flow = []
         self.lp = None
-        self.x = None
-        self.exp_cost = None
-        self.exp_reward = None
-
-
         self.time_step = 0
-
-    def act(self, state):
-        probabilities = self.policy[self.time_step][state]
-        if probabilities.ndim > 1:
-            agent_id = getattr(self, 'agent_id', 0)  # Ensure each agent has an ID
-            probabilities = probabilities[agent_id]  # Select only this agent's row
-
-        if len(probabilities) != len(self.actions):
-            raise ValueError(
-                f"Size mismatch: actions={len(self.actions)}, probabilities={len(probabilities)}\n"
-                f"Probabilities: {probabilities}"
-            )
-        if probabilities is None or not isinstance(probabilities, np.ndarray):
-            raise ValueError(f"Policy distribution is invalid: {probabilities}")
-        if probabilities.ndim != 1:
-            raise ValueError(f"Policy probabilities must be 1D, got shape {probabilities.shape}")
-
-        action = self.rng.choice(self.actions, size=1, p=probabilities)[0]
-        self.time_step += 1
-
-        return action
-
-    def add_transition(self, state, reward, action, next_state, done, info=None):
-        pass
-
-    @classmethod
-    def from_discrete_env(cls, env: DiscreteEnv, **kwargs) -> 'LinearProgrammingPlanner':
-        """
-        gets as input a gym discrete env and returns a value iteration agent to solve
-        :param env: a gym discrete env
-        :param kwargs: args for planner
-        :return: a planner
-        """
-        transition, reward, cost, terminal = get_mdp_functions(env)
-        for s in np.arange(env.nS)[terminal]:
-            transition[s, :, :] = 0
-            transition[s, :, s] = 1
-            reward[s, :] = 0
-            cost[s, :] = 0
-        max_reward, min_reward = reward.max(), reward.min()
-        max_cost, min_cost = cost.max(), cost.min()
-        return cls(transition, reward, cost, terminal, env.isd, env, max_reward, min_reward, max_cost, min_cost, **kwargs)
 
     def solve(self):
         t0 = time.perf_counter()
         if self.verbose:
-            print("instantiating LP")
+            print("Instantiating LP...")
+
         self.instantiate_lp()
-        if self.verbose:
-            print("LP instantiated in {} seconds".format(time.perf_counter() - t0))
-            t0 = time.perf_counter()
 
-        self.solve_lp()
         if self.verbose:
-            print("LP solved in {} seconds".format(time.perf_counter() - t0))
-        if self.lp.status == cv.INFEASIBLE:
-            print("LP is infeasible")
-        if self.lp.status == cv.UNBOUNDED:
-            print("LP is unbounded")
-        # elif self.lp.status in [cv.OPTIMAL, cv.OPTIMAL_INACCURATE]:
-        self.extract_policy()
+            print(f"LP instantiated in {time.perf_counter() - t0:.2f} seconds")
 
-    def solve_lp(self):
-        if self.solver == 'grb':
-            solve_gurobi_lp(self.lp, self.verbose)
-            return self.lp.status == 2  # optimal
-        else:
-            self.lp.solve(verbose=self.verbose)
-            return self.lp.status == cv.OPTIMAL
+        self.lp.solve(verbose=self.verbose)
+
+        if self.verbose:
+            print(f"LP solved in {time.perf_counter() - t0:.2f} seconds")
+            print(f"Problem status: {self.lp.status}")
 
     def instantiate_lp(self):
-        if self.solver == 'grb':
-            self.instantiate_lp_grb()
-        else:
-            self.instantiate_lp_cvxpy()
-
-    def instantiate_lp_cvxpy(self):
-        # variables
-        self.x = [
-            cv.Variable(shape=(self.ns, self.na),
-                        nonneg=True,
-                        name="x[{}]".format(h))
-            for h in range(self.horizon)
+        # Variables: flow[h][agent][i][j]
+        self.flow = [
+            [
+                cv.Variable((self.n_resources, self.n_resources), nonneg=True)
+                for _ in range(self.n_agents)
+            ]
+            for _ in range(self.horizon)
         ]
 
-        # expressions
-        self.exp_reward = cv.Constant(0)
-        self.exp_cost = cv.Constant(0)
-        for h in range(self.horizon):
-            self.exp_reward += cv.sum(cv.multiply(self.x[h], self.reward))
-            self.exp_cost += cv.sum(cv.multiply(self.x[h], self.cost))
+        # Objective: maximize total reward across horizon and agents
+        objective = cv.Maximize(
+            sum(
+                cv.sum(cv.multiply(self.flow[h][agent], self.reward[agent]))
+                for h in range(self.horizon)
+                for agent in range(self.n_agents)
+            )
+        )
 
-        # objective
-        obj = cv.Maximize(self.exp_reward)
+        constraints = []
 
-        # constraints
-        if self.horizon > 0:
-            constraints = [
-                # first time step outflow
-                cv.sum(self.x[0][s]) ==
-                # first time step inflow
-                self.isd[s]
-                for s in self.states
-            ]
+        # Initial step: match each agent's initial distribution
+        for agent in range(self.n_agents):
+            for i in range(self.n_resources):
+                constraints.append(cv.sum(self.flow[0][agent][i, :]) == self.initial_distribution[agent, i])
+
+        # Flow conservation for each agent at each step
+        for agent in range(self.n_agents):
             for h in range(1, self.horizon):
-                constraints += [
-                    # outflow == inflow
-                    cv.sum(self.x[h][s]) == cv.sum(cv.multiply(self.x[h - 1], self.transition[:, :, s]))
-                    for s in self.non_terminal_states
-                ]
-                # Only add terminal constraints if there are terminal states
-                if len(self.terminal_states) > 0:
-                    constraints += [
-                    cv.sum(self.x[h][self.terminal_states], axis=1) == 0
-                    ]
-        else:
-            constraints = []
-        if self.cost_bound is not None:
-            constraints.append(self.exp_cost <= self.cost_bound)
+                for j in range(self.n_resources):
+                    inflow = cv.sum(self.flow[h-1][agent][:, j])
+                    outflow = cv.sum(self.flow[h][agent][j, :])
+                    constraints.append(inflow == outflow)
 
-        # problem
-        self.lp = cv.Problem(obj, constraints)
-
-    def instantiate_lp_grb(self):
-        self.lp = Model('ConstrainedMDP')
-        if not self.verbose:
-            self.lp.Params.OutputFlag = 0
-
-        if self.verbose:
-            print("adding variables")
-        self.x = x = self.lp.addVars(range(self.horizon), self.states, self.actions, lb=0.0, name='x')
-
-        if self.verbose:
-            print("adding constraints")
-
-        self.exp_reward = quicksum(
-            quicksum(
-                quicksum(
-                    x[h, s, a] * self.reward[s, a]
-                    for h in range(self.horizon)
-                )
-                for a in self.actions
-            )
-            for s in self.non_terminal_states
-        )
-        self.exp_cost = quicksum(
-            quicksum(
-                quicksum(
-                    x[h, s, a] * self.cost[s, a]
-                    for h in range(self.horizon)
-                )
-                for a in self.actions
-            )
-            for s in self.non_terminal_states
-        )
-        if self.cost_bound is not None:
-            self.lp.addConstr(
-                self.exp_cost <= self.cost_bound,
-                'expected_cost_bound'
-            )
-
-        if self.horizon > 0:
-            self.lp.addConstrs((
-                quicksum(x[0, s, a] for a in self.actions) == self.isd[s]
-                for s in self.states
-            ), 'isd')
-
-        self.lp.addConstrs((
-            # out(suc)- in(suc) == isd(suc)
-            quicksum(x[h, suc, a] for a in self.actions)
-            == quicksum(
-                quicksum(
-                    self.transition[s, a, suc] * x[h-1, s, a]
-                    for s in np.arange(self.ns)[self.transition[:, a, suc].nonzero()]
-                    # for s in self.states
-                ) for a in self.actions)
-            for suc in self.non_terminal_states for h in range(1, self.horizon)
-        ), 'transient')
-
-        self.lp.addConstrs((
-            quicksum(
-                x[h, suc, a]
-                for a in self.actions
-            ) == 0
-            for suc in self.states if self.terminal[suc] for h in range(self.horizon)
-        ), 'terminal_flow')
-
-        if self.verbose:
-            print("setting objective")
-        self.lp.setObjective(
-            self.exp_reward,
-            GRB.MAXIMIZE
-        )
-
-        self.lp.update()
-
-    def get_policy(self, time_step=0):
-        return self.policy[time_step]
-
-    def extract_policy(self):
-        return self.extract_ground_policy()
-
-    def extract_ground_policy(self):
+        # Resource capacity constraint at each step
         for h in range(self.horizon):
-            for s in self.states:
-                self.set_policy(h, s)
+            for j in range(self.n_resources):
+                total_occupancy = cv.sum(
+                    [cv.sum(self.flow[h][agent][:, j]) for agent in range(self.n_agents)]
+                )
+                constraints.append(total_occupancy <= self.resource_capacity)
 
-    def set_policy(self, h, s):
-        occupancy = self.get_occupancy(h, s)
-        state_occupancy = occupancy.sum()
-        if state_occupancy > 0:
-            self.policy[h][s] = occupancy / state_occupancy
-        else:
-            self.policy[h][s] = np.full(self.na, fill_value=1. / self.na)
+        # Total number of agents constraint (optional, depends if needed)
+        for h in range(self.horizon):
+            total_agents = cv.sum(
+                [cv.sum(self.flow[h][agent]) for agent in range(self.n_agents)]
+            )
+            constraints.append(total_agents == self.n_agents)
 
-    def get_occupancy(self, h, s):
-        if self.solver == 'grb':
-            occupancy = np.zeros(self.na, dtype=float)
-            for a in self.actions:
-                occupancy[a] = max(self.x[h, s, a].x, 0)
-        else:
-            occupancy = np.maximum(self.x[h][s].value, np.zeros(self.na))
-        return occupancy
+        self.lp = cv.Problem(objective, constraints)
 
-    def end_episode(self, evaluation=False):
-        self.time_step = 0
+    def get_flow_plan(self):
+        """
+        Returns a list of [horizon] elements, each a list of [n_agents] flow matrices (n_resources x n_resources)
+        """
+        return [
+            [f.value for f in flow_h]
+            for flow_h in self.flow
+        ]
 
-    def expected_value(self, _) -> float:
-        if self.solver == 'grb':
-            return self.exp_reward.getValue()
-        else:
-            return self.exp_reward.value
-
-    def get_expected_cost(self) -> float:
-        if self.solver == 'grb':
-            return self.exp_cost.getValue()
-        else:
-            return self.exp_cost.value
+    def expected_reward(self) -> float:
+        return self.lp.value if self.lp is not None else None
 
     def seed(self, seed):
-        self.rng = np.random.default_rng(seed)
+        np.random.seed(seed)
