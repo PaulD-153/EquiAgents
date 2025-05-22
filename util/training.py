@@ -184,6 +184,11 @@ def train_agents_with_dynamic_master(env, agents, number_of_episodes, max_column
         metrics['actual_stepwise_fairness'].append(np.mean(fairness_per_timestep))
 
         print(f"Finished episode {episode+1} with actual return {episode_return:.2f}, fairness {fairness_score:.4f}, optimal usage {optimal_usage_score:.4f}, agent claims: {agent_claims}")
-
+    # Include metric average stepwise fairness per seed
+    metrics['average_expected_stepwise_fairness'] = np.mean(metrics['expected_stepwise_fairness'])
+    
+    # Write all metrics to CSV
+    metrics_df = pd.DataFrame(metrics)
+    metrics_df.to_csv(os.path.join('results', f"metrics_seed{seed}(fairness={fairness},langrangian={langrangian},fair_constraint={fairness_constraint}).csv"), index=False)
     plot_all_metrics(metrics, seed, fairness=fairness, langrangian=langrangian, fair_constraint=fairness_constraint)
     return metrics

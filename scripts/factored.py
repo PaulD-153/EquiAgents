@@ -7,7 +7,7 @@ from env.resource_mdp_env import ResourceMDPEnv
 
 def main():
     horizon = 5
-    num_episodes = 5
+    num_episodes = 25
     max_column_generation_rounds = 50
     num_agents = 5
     reward_profile = {
@@ -29,7 +29,7 @@ def main():
         raise ValueError(f"Reward profile length {len(reward_profile)} does not match number of agents {num_agents}.")
     seeds = range(3)
     verbose = False
-    FAIRNESS_ENABLED = True  # Toggle fairness constraint here
+    FAIRNESS_ENABLED = False  # Toggle fairness constraint here
     if FAIRNESS_ENABLED:
         FAIRNESS_CONSTRAINTS_ENABLED = False  # Toggle constraints here
         LANGRANGIAN_ENABLED = True  # Toggle Langranian relaxation here
