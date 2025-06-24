@@ -1,8 +1,12 @@
 import cvxpy as cv
 import numpy as np
+from util.fairness_penalties import (
+    variance_penalty, jain_index_penalty, nsw_penalty, minshare_penalty, gini_penalty, envy_scaled_penalty
+)
+
 
 class MasterProblem:
-    def __init__(self, agents, resource_capacity=1, fairness=False, fairness_constraint=False, langrangian=False, langrangian_weight=1.0):
+    def __init__(self, agents, resource_capacity=1, fairness=False, fairness_constraint=False, langrangian=False, langrangian_weight=1.0, fairness_type="variance", reward_scaling=None):
         self.agents = agents
         self.horizon = agents[0].horizon
         self.num_agents = len(agents)
@@ -11,6 +15,8 @@ class MasterProblem:
         self.fairness_constraint = fairness_constraint
         self.langrangian = langrangian
         self.langrangian_weight = langrangian_weight
+        self.fairness_type = fairness_type
+        self.reward_scaling = reward_scaling if reward_scaling is not None else [1.0] * self.num_agents
         self.decision_vars = []
         self.lp = None
         self.resource_constraints = []  # Save constraints to access duals
@@ -44,31 +50,10 @@ class MasterProblem:
             constraints.append(constraint)
             self.resource_constraints.append(constraint)
 
-        # Fairness constraints: expected rewards for each agent should be similar
-        # This is a simple implementation; adjust the tolerance and method as needed to fit fairness definition
-        # Note: This assumes that the expected rewards are calculated as the sum of the selected columns
-        if self.fairness_constraint:
-            print("Adding linear fairness constraints (per timestep)...")
-            epsilon = 0.5  # tolerance
-
-            for t in range(self.horizon):
-                expected_claims_t = []
-                for a in range(self.num_agents):
-                    expr = 0
-                    for c, column in enumerate(self.agents[a].get_columns()):
-                        expr += self.decision_vars[a][c] * column["claims"][t]
-                    expected_claims_t.append(expr)
-
-                mean_claim_t = cv.sum(expected_claims_t) / self.num_agents
-                for a in range(self.num_agents):
-                    constraints.append(expected_claims_t[a] >= mean_claim_t - epsilon)
-                    constraints.append(expected_claims_t[a] <= mean_claim_t + epsilon)
         # Objective: maximize expected total reward
         total_expected_reward = 0
 
         if self.langrangian:
-            # Compute expected reward per agent
-            print("Computing expected reward per agent using Langrangian...")
             for t in range(self.horizon):
                 expected_claims_t = []
                 for a in range(self.num_agents):
@@ -77,12 +62,25 @@ class MasterProblem:
                         expr += self.decision_vars[a][c] * column["claims"][t]
                     expected_claims_t.append(expr)
 
-                mean_claim_t = cv.sum(expected_claims_t) / self.num_agents
-                diffs = cv.vstack([claim - mean_claim_t for claim in expected_claims_t])
-                variance_t = cv.sum_squares(diffs)
+                # Choose penalty based on selected fairness_type
+                if self.fairness_type == "variance":
+                    fairness_penalty = variance_penalty(expected_claims_t)
+                elif self.fairness_type == "jain":
+                    fairness_penalty = jain_index_penalty(expected_claims_t)
+                elif self.fairness_type == "nsw":
+                    fairness_penalty = nsw_penalty(expected_claims_t)
+                elif self.fairness_type == "minshare":
+                    fairness_penalty = minshare_penalty(expected_claims_t)
+                elif self.fairness_type == "gini":
+                    fairness_penalty = gini_penalty(expected_claims_t)
+                elif self.fairness_type == "envy_scaled":
+                    if self.reward_scaling is None:
+                        raise ValueError("Reward scaling must be provided for envy_scaled penalty.")
+                    fairness_penalty = envy_scaled_penalty(expected_claims_t, self.reward_scaling)
+                else:
+                    raise ValueError(f"Unknown fairness type: {self.fairness_type}")
 
-                # Penalize deviation from equal expected claim per timestep
-                total_expected_reward -= self.langrangian_weight * variance_t
+                total_expected_reward -= self.langrangian_weight * fairness_penalty
 
         for a, agent in enumerate(self.agents):
             for c, column in enumerate(agent.get_columns()):
@@ -91,20 +89,9 @@ class MasterProblem:
                 net_value = reward - cost  # optionally add a cost_weight factor
                 total_expected_reward += self.decision_vars[a][c] * net_value
 
-
-        if self.fairness_constraint:
-            self.fairness_constraints = constraints[-1 * self.num_agents:]  # last added fairness constraints
-
-
         objective = cv.Maximize(total_expected_reward)
-
         self.lp = cv.Problem(objective, constraints)
-
         self.lp.solve(verbose=False)
-
-        if self.fairness_constraint:
-            for i, constraint in enumerate(self.fairness_constraints):
-                print(f"Fairness constraint {i}: dual = {constraint.dual_value}")
 
         print("Master LP Status:", self.lp.status)
         print("Master LP Objective Value:", self.lp.value)

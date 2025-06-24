@@ -8,7 +8,7 @@ from env.resource_mdp_env import ResourceMDPEnv
 def main():
     horizon = 5
     num_episodes = 25
-    max_column_generation_rounds = 50
+    max_column_generation_rounds = 25
     num_agents = 5
     reward_profile = {
         0: (1, 5),  # Agent 0 gets rewards
@@ -25,11 +25,18 @@ def main():
         4: (1, 1)   # Agent 4 has costs
     }
 
+    reward_scaling = []
+    for a in range(num_agents):
+        low, high = reward_profile[a]
+        reward_scaling.append(high)  # worst case maximum reward
+
     if len(reward_profile) != num_agents:
         raise ValueError(f"Reward profile length {len(reward_profile)} does not match number of agents {num_agents}.")
     seeds = range(3)
     verbose = False
     FAIRNESS_ENABLED = False  # Toggle fairness constraint here
+    FAIRNESS_METRICS = ["jain", "nsw", "minshare", "gini", "variance", "envy_scaled"]
+    FAIRNESS_TYPE = "envy_scaled"  # Options: "variance", "jain", "nsw", "minshare", "gini", "envy_scaled"
     if FAIRNESS_ENABLED:
         FAIRNESS_CONSTRAINTS_ENABLED = False  # Toggle constraints here
         LANGRANGIAN_ENABLED = True  # Toggle Langranian relaxation here
@@ -70,7 +77,7 @@ def main():
 
         # Train with master coordination
         print(f"Running column generation experiment for seed {seed}")
-        metrics = train_agents_with_dynamic_master(env, agents, num_episodes, verbose=verbose, max_column_generation_rounds=max_column_generation_rounds, fairness=FAIRNESS_ENABLED, fairness_constraint=FAIRNESS_CONSTRAINTS_ENABLED, langrangian=LANGRANGIAN_ENABLED, langrangian_weight=LAMBDA_FAIR, seed=seed)
+        metrics = train_agents_with_dynamic_master(env, agents, num_episodes, verbose=verbose, max_column_generation_rounds=max_column_generation_rounds, fairness=FAIRNESS_ENABLED, fairness_constraint=FAIRNESS_CONSTRAINTS_ENABLED, langrangian=LANGRANGIAN_ENABLED, langrangian_weight=LAMBDA_FAIR, fairness_type=FAIRNESS_TYPE, seed=seed, reward_scaling=reward_scaling, fairness_metrics=FAIRNESS_METRICS)
         print(f"Metrics for seed {seed}: {metrics}")
 
 if __name__ == '__main__':
