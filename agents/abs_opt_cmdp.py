@@ -1,244 +1,212 @@
 import numpy as np
-
 from planners.lp import LinearProgrammingPlanner
-from util.mdp import get_mdp_functions
-from util.mdp import get_mdp_functions_partial
-from env.multi_agent_env import MultiAgentEnv
+from planners.lp_minimal import MinimalFairnessPlanner
+import cvxpy as cv
+from typing import Dict, List
 
 np.seterr(invalid='ignore', divide='ignore')
 
 
-class AbsOptCMDPAgent:
-    def __init__(self,
-                 ns: int,
-                 na: int,
-                 terminal: np.array,
-                 isd: np.array,
-                 env,
-                 max_reward, min_reward,
-                 horizon=3,
-                 cost_bound=None,
-                 policy_type='ground',
-                 cost_bound_coefficient=1,
-                 solver='grb',  # grb, cvxpy
-                 verbose=False,
-                 reward_scale=1.0,
-                 cost_scale=1.0,
-                 agent_id=0,
-                 agent_type=None,
-                 lambda_penalty=0.0):
-
-        self.ns, self.na = ns, na
-        self.terminal = terminal
-        self.isd = isd
-        self.env = env
-        self.horizon = horizon
-        self.cost_bound = cost_bound
-        self.policy_type = policy_type
-        self.cost_bound_coefficient = cost_bound_coefficient
-        self.verbose = verbose
-
-        self.reward_scale = reward_scale
-        self.cost_scale = cost_scale
+class DecentralizedAgentWithColumns:
+    def __init__(self, agent_id, horizon, resource_capacity, num_columns=5, verbose=True, reward_profile: Dict[int, tuple] = None, cost_profile: Dict[int, tuple] = None):
         self.agent_id = agent_id
-        self.agent_type = agent_type
+        self.horizon = horizon
+        self.resource_capacity = resource_capacity
+        self.num_columns = num_columns
+        self.verbose = verbose
+        self.columns = []
+        self.selected_plan = None
+
+        self.reward_profile = reward_profile or {agent_id: (0.3, 1.0)}  # default fallback
+        self.fixed_reward_vector = None
+        self.cost_profile = cost_profile or {agent_id: (0.0, 1.0)}  # default fallback
+        self.fixed_cost_vector = None
 
         self.episode = 0
-        self.initial_epsilon = 1.0
-        self.min_epsilon = 0.0
-        self.epsilon_decay = 0.004
 
-        self.visited_resources = []
+    def generate_candidate_columns(self):
+        self.columns = []
 
-        self.max_reward = max(max_reward, 0)
-        self.min_reward = min_reward
-        if terminal.any():
-            self.max_reward = max(self.max_reward, 0)
-
-        self.estimated_transition = np.full((ns, na, ns), fill_value=1/ns)
-        self.estimated_reward = np.full((ns, na), fill_value=self.max_reward)
-        self.ensure_terminal_states_are_absorbing()
-
-        self.counter_sas = np.zeros((ns, na, ns), dtype=int)
-        self.new_counter_sas = np.zeros((ns, na, ns), dtype=int)
-        self.acc_reward = np.zeros((ns, na))
-
-        self.lambda_penalty = lambda_penalty
-
-        self.solver = solver
-        self.planner = self.instantiate_planner()
-
-        # computing initial policy
-        self.planner.solve()
+        # Initialize reward vector ONCE per episode
+        if self.fixed_reward_vector is None:
+            low, high = self.reward_profile.get(self.agent_id)
+            self.fixed_reward_vector = np.random.uniform(low=low, high=high, size=self.horizon)
         
+        if self.fixed_cost_vector is None:
+            low, high = self.cost_profile.get(self.agent_id)
+            self.fixed_cost_vector = np.random.uniform(low=low, high=high, size=self.horizon)
 
-    def instantiate_planner(self):
-        if (self.counter_sas > 0).any():
-            inverse_counter = 1 / np.maximum(self.counter_sas.sum(axis=2), 1)
-            var_transition = self.estimated_transition * (1 - self.estimated_transition)
+        # Add the LP-generated greedy plan
+        self.generate_lp_column()
 
-            transition_ci = np.sqrt(var_transition * inverse_counter[:, :, np.newaxis]) + inverse_counter[:, :, np.newaxis]
-            transition_ci[self.terminal] = 0
+        # Add a "do nothing" fallback column (ensures feasibility)
+        zero_claim_plan = [0.0 for _ in range(self.horizon)]
+        zero_reward_vector = np.zeros(self.horizon)
 
-            if False:
-                # this is the theoretical upper-bound on the confidence interval
-                reward_ci = np.sqrt(inverse_counter) * (self.max_reward - self.min_reward)
-            else:
-                reward_ci = inverse_counter * (self.max_reward - self.min_reward)
-            reward_ci[self.terminal] = 0
-        else:
-            transition_ci=np.full((self.ns, self.na, self.ns), fill_value=1.0)
-            reward_ci=np.full((self.ns, self.na), fill_value=self.max_reward - self.min_reward)
+        self.columns.append({
+            "claims": zero_claim_plan,
+            "reward": zero_reward_vector
+        })
 
-        return LinearProgrammingPlanner(
-            self.estimated_transition, self.estimated_reward, None, self.terminal, self.isd,
-            self.env, self.max_reward, self.min_reward, 0, 0,
-            cost_bound=self.cost_bound,
-            horizon=self.horizon,
-            verbose=self.verbose,
-            solver=self.solver
-        )
+        return self.columns
 
-    @classmethod
-    def from_discrete_env(cls, env: MultiAgentEnv, agent_id=0, **kwargs):
-        if hasattr(env, 'envs'):
-            agent_env = env.envs[agent_id]
-        elif hasattr(env, 'env'):
-            agent_env = env.env
-        else:
-            agent_env = env
-        print("Printing agent environment inside agent:", agent_env)
-        transition, reward, _, terminal = get_mdp_functions(agent_env)
-        
-        # Save original terminal mask and override it.
-        original_terminal = terminal.copy()
-        terminal = np.zeros_like(terminal, dtype=bool)
-        for s in range(agent_env.nS):
-            if original_terminal[s]:
-                transition[s, :, :] = 0
-                transition[s, :, s] = 1
-                reward[s, :] = 0  # originally set to zero
-        # Instead of leaving rewards at zero, update them based on the agent's type.
-        agent_type = kwargs.get('agent_type', None)
-        for s in range(agent_env.nS):
-            for a in range(agent_env.nA):
-                res_type, res_id = agent_env.map_action_to_resource(a)
-                if agent_type is not None:
-                    # Set a higher baseline reward for a match.
-                    if agent_type == res_type:
-                        reward[s, a] = 10
-                    else:
-                        reward[s, a] = 5
-                else:
-                    reward[s, a] = 5  # default reward if agent_type is not set.
 
-        max_reward, min_reward = reward.max(), reward.min()
-        
-        kwargs.pop('features', None)
-        
-        return cls(
-            agent_env.nS, agent_env.nA, terminal, agent_env.isd, agent_env,
-            max_reward, min_reward, **kwargs, agent_id=agent_id
-        )
-
-    def ensure_terminal_states_are_absorbing(self):
-        for s in np.arange(self.ns)[self.terminal]:
-            self.estimated_transition[s, :, :] = 0
-            self.estimated_transition[s, :, s] = 1
-            self.estimated_reward[s, :] = 0
-
-    def act(self, state, evaluation=False):
-        """ This act method does not use the self.planner.act() function!"""
-    # Compute decaying epsilon: it decays as the number of episodes increases.
-        epsilon = max(self.min_epsilon, self.initial_epsilon / (1 + self.episode * self.epsilon_decay))
-
-        # If in evaluation mode, set epsilon to zero.
-        if evaluation:
-            epsilon = 0.0
-
-        # With probability epsilon, choose a random action from available ones.
-        if self.planner.rng.random() < epsilon:
-            available = [a for a in range(self.planner.na) if a not in self.visited_resources]
-            if available:
-                action = self.planner.rng.choice(available)
-            else:
-                action = self.planner.rng.choice(list(range(self.planner.na)))
-        else:
-            # Otherwise, use the LP-derived policy:
-            probabilities = self.planner.policy[self.planner.time_step][state].copy()
-            # Filter out visited actions:
-            for a in self.visited_resources:
-                probabilities[a] = 0
-            total = probabilities.sum()
-            if total > 0:
-                probabilities /= total
-            else:
-                probabilities = np.full(self.planner.na, 1.0 / self.planner.na)
-            action = self.planner.rng.choice(list(range(self.planner.na)), p=probabilities)
-        
-        # Record the chosen action as visited:
-        self.visited_resources.append(action)
-        # Increment the time step if not at the last one.
-        if self.planner.time_step < self.horizon - 1:
-            self.planner.time_step += 1
-        return action
-
-    def add_transition(self, state, reward, action, next_state, done, info=None):
-        self.acc_reward[state, action] += reward
-        self.new_counter_sas[state, action, next_state] += 1
-        self.planner.add_transition(state, reward, action, next_state, done, info)
-
-    def end_episode(self, evaluation=False):
-        if not evaluation:
-            self.aggregate_new_samples()
-            self.update_estimate()
-            self.update_planner()
-            self.planner.solve()
-        self.visited_resources = []
-        self.planner.end_episode()
-        self.episode += 1
-
-    def enough_new_samples_collected(self):
-        return (self.new_counter_sas > self.counter_sas).any()
-
-    def aggregate_new_samples(self):
-        self.counter_sas += self.new_counter_sas
-        self.new_counter_sas.fill(0)
-
-    def update_estimate(self):
-        counter_sa = np.maximum(self.counter_sas.sum(axis=2), 1)
-        alpha = 0.1
-        new_estimated_reward = (self.acc_reward / counter_sa) * self.reward_scale
-        self.estimated_reward = (1 - alpha) * self.estimated_reward + alpha * new_estimated_reward
-        self.estimated_transition = self.counter_sas / counter_sa[:, :, np.newaxis]
-        self.ensure_terminal_states_are_absorbing()
-
-    def update_planner(self):
-        self.planner = self.instantiate_planner()
-
-    def expected_value(self, _) -> float:
-        return self.planner.expected_value(self.isd)
-
-    def get_expected_cost(self) -> float:
-        return self.planner.get_expected_cost()
-
-    def seed(self, seed):
-        self.planner.seed(seed)
-
-    def get_expected_reward(self, state):
+    def generate_new_column_based_on_feedback(self, dual_prices, fairness_duals=None):
         """
-        Compute the expected reward at a given state.
-        `state` should be a single state index (e.g. an integer).
+        Use dual prices to construct a new plan via LP:
+        maximize sum((reward - dual) * claim)
+        s.t. claim in [0, 1]
         """
-        # Ensure that the planner's policy is available.
-        # We assume that self.planner.policy is an array of shape (horizon, ns, na)
-        try:
-            policy_at_state = self.planner.policy[self.planner.time_step][state]
-        except Exception as e:
-            print("Error accessing policy at time step", self.planner.time_step, "state", state, ":", e)
-            return 0.0
-        # Compute the expected reward as the dot-product between the policy and the estimated rewards.
-        expected_reward = np.dot(policy_at_state, self.estimated_reward[state])
-        return expected_reward
+        reward_vector = self.fixed_reward_vector
+        cost_vector = self.fixed_cost_vector 
+
+        # Combine fairness and congestion duals (optional)
+        total_dual = np.array(dual_prices, dtype=float)
+        if fairness_duals is not None:
+            fairness_duals = np.array(fairness_duals, dtype=float)
+            total_dual += fairness_duals  # simple additive for now
+
+        # LP variables: claim probabilities per timestep
+        claim_vars = cv.Variable(self.horizon)
+
+        # Objective: weighted reward - dual penalty
+        print(f"Agent {self.agent_id} dual prices: {total_dual}")
+        if len(total_dual) != self.horizon:
+            print(f"[Warning] total_dual length {len(total_dual)} != horizon {self.horizon}, defaulting to 1s.")
+            total_dual = np.ones(self.horizon)
+        adjusted_value = reward_vector - cost_vector * total_dual
+
+        # Penalize total claim volume slightly (e.g., lambda = 0.1)
+        regularization_penalty = 0.5 * cv.sum_squares(claim_vars)
+        objective = cv.Maximize(cv.sum(cv.multiply(adjusted_value, claim_vars)) - regularization_penalty)
+
+        constraints = [
+            claim_vars >= 0,
+            claim_vars <= 1,
+        ]
+
+        problem = cv.Problem(objective, constraints)
+        problem.solve()
+
+        if self.verbose:
+            print(f"[Agent {self.agent_id}] LP column gen status: {problem.status}")
+
+        plan = claim_vars.value.tolist()
+        plan = [max(0.0, min(1.0, p)) for p in plan]  # clip to [0,1] just in case
+        print(f"Agent {self.agent_id} generated plan: {plan}")
+        print(f"Agent {self.agent_id} generated reward: {reward_vector}")
+        self.columns.append({
+            "claims": plan,
+            "reward": reward_vector  # Store reward separately
+        })
 
 
+        if self.verbose:
+            print(f"[Agent {self.agent_id}] Generated plan with duals {dual_prices}: {plan}")
+
+
+
+    def generate_lp_column(self, penalty_weight=0.1):
+        """
+        Generate a reward-maximizing initial plan using LP:
+        maximize ∑ (reward_t - penalty_weight) * claim_t
+        s.t. claim_t ∈ [0,1]
+        """
+        claim_vars = cv.Variable(self.horizon)
+        
+        # Get reward vector for this agent (external reward)
+        low, high = self.reward_profile.get(self.agent_id)
+        reward_vector = np.random.uniform(low=low, high=high, size=self.horizon)
+
+        # Penalize claiming to avoid greedy overclaiming (encourages diversity)
+        objective = cv.Maximize(cv.sum(cv.multiply(reward_vector, claim_vars)) - penalty_weight * cv.sum(claim_vars))
+        
+        constraints = [
+            claim_vars >= 0,
+            claim_vars <= 1
+        ]
+
+        problem = cv.Problem(objective, constraints)
+        problem.solve()
+
+        if self.verbose:
+            print(f"[Agent {self.agent_id}] LP column gen status: {problem.status}")
+            print(f"[Agent {self.agent_id}] Reward vector: {reward_vector}")
+            print(f"[Agent {self.agent_id}] Generated plan: {claim_vars.value}")
+
+        # Clip just in case of numerical error
+        plan = np.clip(claim_vars.value, 0.0, 1.0).tolist()
+
+        self.columns.append({
+            "claims": plan,
+            "reward": reward_vector  # Needed for expected reward computation
+        })
+
+    def generate_best_response_column(self, dual_prices, fairness_duals=None):
+        # This is like your current generate_new_column_based_on_feedback
+        # but it also returns the reduced cost of the new column
+        reward_vector = self.fixed_reward_vector
+        cost_vector = self.fixed_cost_vector 
+
+        total_dual = np.array(dual_prices, dtype=float)
+        if fairness_duals is not None:
+            total_dual += np.array(fairness_duals, dtype=float)
+
+        # Adjusted reward = reward - dual
+        adjusted_reward = reward_vector - cost_vector * total_dual
+
+        claim_vars = cv.Variable(self.horizon)
+
+        # Strong L2 penalty to suppress full-1 plans
+        penalty = 0.9 * cv.sum_squares(claim_vars)
+
+        objective = cv.Maximize(cv.sum(cv.multiply(adjusted_reward, claim_vars)) - penalty)
+        constraints = [claim_vars >= 0, claim_vars <= 1]
+        problem = cv.Problem(objective, constraints)
+        
+        print(f"[Agent {self.agent_id}] Round RC check")
+        print(f"  cost_vector:         {np.round(cost_vector, 3)}")
+        print(f"  reward_vector:        {np.round(reward_vector, 3)}")
+        print(f"  total_dual:           {np.round(total_dual, 3)}")
+        print(f"  adjusted_reward:      {np.round(adjusted_reward, 3)}")        
+        
+        
+        problem.solve()
+
+        plan = np.clip(claim_vars.value, 0.0, 1.0)
+        # Check if this plan is too similar to existing ones
+        plan_tuple = tuple(np.round(plan, 5))  # round to avoid float noise
+        existing_plan_tuples = {tuple(np.round(c['claims'], 5)) for c in self.columns}
+
+        if plan_tuple in existing_plan_tuples:
+            self.last_column_reduced_cost = 0  # Not improving
+            if self.verbose:
+                print(f"[Agent {self.agent_id}] Duplicate column detected, skipping.")
+            return {"claims": plan.tolist(), "reward": self.fixed_reward_vector}  # still return it
+
+        # Otherwise it's a new column
+        reduced_cost = -problem.value
+        column = {"claims": plan.tolist(), "reward": self.fixed_reward_vector}
+        self.last_column_reduced_cost = reduced_cost
+        return column
+
+    def get_last_column_reduced_cost(self):
+        return getattr(self, 'last_column_reduced_cost', 0)
+
+
+    def get_columns(self):
+        return self.columns
+    
+    def end_episode(self):
+        """
+        Reset or update anything needed between episodes.
+        Currently nothing is needed for decentralized agents.
+        """
+        self.fixed_reward_vector = None  # Reset fixed reward vector if needed
+
+    def reset(self):
+        """
+        Reset the agent's state.
+        """
+        self.columns = []
+        self.selected_plan = None
