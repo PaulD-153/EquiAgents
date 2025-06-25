@@ -8,7 +8,7 @@ np.seterr(invalid='ignore', divide='ignore')
 
 
 class DecentralizedAgentWithColumns:
-    def __init__(self, agent_id, horizon, resource_capacity, num_columns=5, verbose=True, reward_profile: Dict[int, tuple] = None, cost_profile: Dict[int, tuple] = None):
+    def __init__(self, agent_id, horizon, resource_capacity, num_columns=5, verbose=True, reward_profile: Dict[int, tuple] = None, cost_profile: Dict[int, tuple] = None, langrangian_weight=1.0):
         self.agent_id = agent_id
         self.horizon = horizon
         self.resource_capacity = resource_capacity
@@ -21,6 +21,7 @@ class DecentralizedAgentWithColumns:
         self.fixed_reward_vector = None
         self.cost_profile = cost_profile or {agent_id: (0.0, 1.0)}  # default fallback
         self.fixed_cost_vector = None
+        self.langrangian_weight = langrangian_weight
 
         self.episode = 0
 
@@ -35,9 +36,6 @@ class DecentralizedAgentWithColumns:
         if self.fixed_cost_vector is None:
             low, high = self.cost_profile.get(self.agent_id)
             self.fixed_cost_vector = np.random.uniform(low=low, high=high, size=self.horizon)
-
-        # Add the LP-generated greedy plan
-        self.generate_lp_column()
 
         # Add a "do nothing" fallback column (ensures feasibility)
         zero_claim_plan = [0.0 for _ in range(self.horizon)]
@@ -76,9 +74,7 @@ class DecentralizedAgentWithColumns:
             total_dual = np.ones(self.horizon)
         adjusted_value = reward_vector - cost_vector * total_dual
 
-        # Penalize total claim volume slightly (e.g., lambda = 0.1)
-        regularization_penalty = 0.5 * cv.sum_squares(claim_vars)
-        objective = cv.Maximize(cv.sum(cv.multiply(adjusted_value, claim_vars)) - regularization_penalty)
+        objective = cv.Maximize(cv.sum(cv.multiply(adjusted_value, claim_vars)))
 
         constraints = [
             claim_vars >= 0,
@@ -143,48 +139,46 @@ class DecentralizedAgentWithColumns:
         })
 
     def generate_best_response_column(self, dual_prices, fairness_duals=None):
-        # This is like your current generate_new_column_based_on_feedback
-        # but it also returns the reduced cost of the new column
         reward_vector = self.fixed_reward_vector
-        cost_vector = self.fixed_cost_vector 
+        cost_vector = self.fixed_cost_vector
 
         total_dual = np.array(dual_prices, dtype=float)
-        if fairness_duals is not None:
-            total_dual += np.array(fairness_duals, dtype=float)
 
-        # Adjusted reward = reward - dual
+        if fairness_duals is None:
+            fairness_duals = np.zeros_like(total_dual)
+        else:
+            fairness_duals = np.array(fairness_duals, dtype=float)
+
         adjusted_reward = reward_vector - cost_vector * total_dual
 
+        if self.langrangian_weight is not None and fairness_duals is not None:
+            adjusted_reward -= self.langrangian_weight * fairness_duals
+
         claim_vars = cv.Variable(self.horizon)
-
-        # Strong L2 penalty to suppress full-1 plans
-        penalty = 0.9 * cv.sum_squares(claim_vars)
-
+        penalty = 0.05 * cv.sum_squares(claim_vars)
         objective = cv.Maximize(cv.sum(cv.multiply(adjusted_reward, claim_vars)) - penalty)
         constraints = [claim_vars >= 0, claim_vars <= 1]
         problem = cv.Problem(objective, constraints)
-        
+
         print(f"[Agent {self.agent_id}] Round RC check")
-        print(f"  cost_vector:         {np.round(cost_vector, 3)}")
-        print(f"  reward_vector:        {np.round(reward_vector, 3)}")
-        print(f"  total_dual:           {np.round(total_dual, 3)}")
-        print(f"  adjusted_reward:      {np.round(adjusted_reward, 3)}")        
-        
-        
+        print(f"  cost_vector:    {np.round(cost_vector, 3)}")
+        print(f"  reward_vector:  {np.round(reward_vector, 3)}")
+        print(f"  dual_prices:    {np.round(total_dual, 3)}")
+        print(f"  fairness_grad:  {np.round(fairness_duals, 3)}")
+        print(f"  adjusted_reward:{np.round(adjusted_reward, 3)}")
+
         problem.solve()
 
         plan = np.clip(claim_vars.value, 0.0, 1.0)
-        # Check if this plan is too similar to existing ones
-        plan_tuple = tuple(np.round(plan, 5))  # round to avoid float noise
+        plan_tuple = tuple(np.round(plan, 5))
         existing_plan_tuples = {tuple(np.round(c['claims'], 5)) for c in self.columns}
 
         if plan_tuple in existing_plan_tuples:
-            self.last_column_reduced_cost = 0  # Not improving
+            self.last_column_reduced_cost = 0
             if self.verbose:
                 print(f"[Agent {self.agent_id}] Duplicate column detected, skipping.")
-            return {"claims": plan.tolist(), "reward": self.fixed_reward_vector}  # still return it
+            return {"claims": plan.tolist(), "reward": self.fixed_reward_vector}
 
-        # Otherwise it's a new column
         reduced_cost = -problem.value
         column = {"claims": plan.tolist(), "reward": self.fixed_reward_vector}
         self.last_column_reduced_cost = reduced_cost

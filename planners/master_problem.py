@@ -1,26 +1,23 @@
 import cvxpy as cv
 import numpy as np
 from util.fairness_penalties import (
-    variance_penalty, jain_index_penalty, nsw_penalty, minshare_penalty, gini_penalty, envy_scaled_penalty
+    variance_penalty, variance_penalty_gradient
 )
 
 
 class MasterProblem:
-    def __init__(self, agents, resource_capacity=1, fairness=False, fairness_constraint=False, langrangian=False, langrangian_weight=1.0, fairness_type="variance", reward_scaling=None):
+    def __init__(self, agents, resource_capacity=1, fairness=False, langrangian=False, langrangian_weight=1.0, fairness_type="variance"):
         self.agents = agents
         self.horizon = agents[0].horizon
         self.num_agents = len(agents)
         self.resource_capacity = resource_capacity
         self.fairness = fairness
-        self.fairness_constraint = fairness_constraint
         self.langrangian = langrangian
         self.langrangian_weight = langrangian_weight
         self.fairness_type = fairness_type
-        self.reward_scaling = reward_scaling if reward_scaling is not None else [1.0] * self.num_agents
         self.decision_vars = []
         self.lp = None
         self.resource_constraints = []  # Save constraints to access duals
-        self.fairness_constraints = []  # Save fairness constraints to access duals
 
     def solve(self):
         constraints = []
@@ -65,18 +62,6 @@ class MasterProblem:
                 # Choose penalty based on selected fairness_type
                 if self.fairness_type == "variance":
                     fairness_penalty = variance_penalty(expected_claims_t)
-                elif self.fairness_type == "jain":
-                    fairness_penalty = jain_index_penalty(expected_claims_t)
-                elif self.fairness_type == "nsw":
-                    fairness_penalty = nsw_penalty(expected_claims_t)
-                elif self.fairness_type == "minshare":
-                    fairness_penalty = minshare_penalty(expected_claims_t)
-                elif self.fairness_type == "gini":
-                    fairness_penalty = gini_penalty(expected_claims_t)
-                elif self.fairness_type == "envy_scaled":
-                    if self.reward_scaling is None:
-                        raise ValueError("Reward scaling must be provided for envy_scaled penalty.")
-                    fairness_penalty = envy_scaled_penalty(expected_claims_t, self.reward_scaling)
                 else:
                     raise ValueError(f"Unknown fairness type: {self.fairness_type}")
 
@@ -96,22 +81,45 @@ class MasterProblem:
         print("Master LP Status:", self.lp.status)
         print("Master LP Objective Value:", self.lp.value)
 
+        # Compute fairness gradients after solving
+        fairness_gradients_per_agent = self.compute_fairness_gradients()
+
         return self.lp.value, self.get_decision_distribution()
+
+    def compute_fairness_gradients(self):
+        """
+        Compute fairness gradients after LP solution for Lagrangian column generation
+        """
+        gradients = []
+
+        for t in range(self.horizon):
+            expected_claims_t = []
+            for a in range(self.num_agents):
+                expr = 0
+                for c, column in enumerate(self.agents[a].get_columns()):
+                    expr += self.decision_vars[a][c].value * column["claims"][t]
+                expected_claims_t.append(expr)
+
+            # Compute fairness gradients for this timestep
+            if self.fairness_type == "variance":
+                grad_t = variance_penalty_gradient(expected_claims_t)
+            else:
+                raise NotImplementedError("Only variance fairness implemented in gradient")
+
+            gradients.append(grad_t)
+
+        # Now we convert per timestep gradients into per-agent gradient vector
+        gradients_per_agent = []
+        for a in range(self.num_agents):
+            agent_grad = np.array([gradients[t][a] for t in range(self.horizon)])
+            gradients_per_agent.append(agent_grad)
+        return gradients_per_agent
 
     def get_dual_prices(self):
         return np.array([
             c.dual_value if c.dual_value is not None else 0.0
             for c in self.resource_constraints
         ])
-
-    def get_fairness_duals(self):
-        if not self.fairness_constraint:
-            return None
-        return np.array([
-            c.dual_value if c.dual_value is not None else 1.0
-            for c in self.fairness_constraints
-        ])
-
 
     def get_decision_distribution(self):
         """
