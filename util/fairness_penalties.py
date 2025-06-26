@@ -17,6 +17,11 @@ def variance_penalty_gradient(expected_claims):
     gradient = [2 * (c - mean) / n for c in expected_claims]
     return gradient
 
+def variance_penalty_numpy(values):
+    values = np.array(values)
+    mean = np.mean(values)
+    return np.mean((values - mean) ** 2)
+
 # def jain_index_penalty(claims):
 #     """
 #     Jain surrogate using variance.

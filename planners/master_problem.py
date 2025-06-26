@@ -1,20 +1,20 @@
 import cvxpy as cv
 import numpy as np
 from util.fairness_penalties import (
-    variance_penalty, variance_penalty_gradient
+    variance_penalty, variance_penalty_gradient, variance_penalty_numpy
 )
 
 
 class MasterProblem:
-    def __init__(self, agents, resource_capacity=1, fairness=False, langrangian=False, langrangian_weight=1.0, fairness_type="variance"):
+    def __init__(self, agents, resource_capacity=1, langrangian_weight=1.0, fairness_type="variance", fairness_scope="timestep"):
         self.agents = agents
         self.horizon = agents[0].horizon
         self.num_agents = len(agents)
         self.resource_capacity = resource_capacity
-        self.fairness = fairness
-        self.langrangian = langrangian
         self.langrangian_weight = langrangian_weight
         self.fairness_type = fairness_type
+        self.fairness_scope = fairness_scope  # "timestep" or "episode"
+
         self.decision_vars = []
         self.lp = None
         self.resource_constraints = []  # Save constraints to access duals
@@ -50,22 +50,36 @@ class MasterProblem:
         # Objective: maximize expected total reward
         total_expected_reward = 0
 
-        if self.langrangian:
-            for t in range(self.horizon):
-                expected_claims_t = []
+        if self.langrangian_weight > 0:
+            if self.fairness_scope == "timestep":
+                # current version (per-timestep variance)
+                for t in range(self.horizon):
+                    expected_claims_t = []
+                    for a in range(self.num_agents):
+                        expr = 0
+                        for c, column in enumerate(self.agents[a].get_columns()):
+                            expr += self.decision_vars[a][c] * column["claims"][t]
+                        expected_claims_t.append(expr)
+
+                    if self.fairness_type == "variance":
+                        fairness_penalty = variance_penalty(expected_claims_t)
+                    total_expected_reward -= self.langrangian_weight * fairness_penalty
+
+            elif self.fairness_scope == "cumulative":
+                # new version (cumulative variance)
+                expected_cumulative_claims = []
                 for a in range(self.num_agents):
                     expr = 0
                     for c, column in enumerate(self.agents[a].get_columns()):
-                        expr += self.decision_vars[a][c] * column["claims"][t]
-                    expected_claims_t.append(expr)
+                        expr += self.decision_vars[a][c] * sum(column["claims"])  # sum across horizon
+                    expected_cumulative_claims.append(expr)
 
-                # Choose penalty based on selected fairness_type
                 if self.fairness_type == "variance":
-                    fairness_penalty = variance_penalty(expected_claims_t)
-                else:
-                    raise ValueError(f"Unknown fairness type: {self.fairness_type}")
-
+                    fairness_penalty = variance_penalty(expected_cumulative_claims)
                 total_expected_reward -= self.langrangian_weight * fairness_penalty
+
+            else:
+                raise ValueError("Unknown fairness_scope option")
 
         for a, agent in enumerate(self.agents):
             for c, column in enumerate(agent.get_columns()):
@@ -84,35 +98,59 @@ class MasterProblem:
         # Compute fairness gradients after solving
         fairness_gradients_per_agent = self.compute_fairness_gradients()
 
-        return self.lp.value, self.get_decision_distribution()
+        fairness_penalty_realized = self.compute_realized_fairness_penalty()
+        fairness_impact = self.langrangian_weight * fairness_penalty_realized
+
+        return self.lp.value, self.get_decision_distribution(), fairness_impact
 
     def compute_fairness_gradients(self):
-        """
-        Compute fairness gradients after LP solution for Lagrangian column generation
-        """
-        gradients = []
+        gradients_per_agent = []
 
-        for t in range(self.horizon):
-            expected_claims_t = []
+        if self.fairness_scope == "timestep":
+            # Existing per-timestep fairness gradients
+            gradients = []
+            for t in range(self.horizon):
+                expected_claims_t = []
+                for a in range(self.num_agents):
+                    expr = 0
+                    for c, column in enumerate(self.agents[a].get_columns()):
+                        expr += self.decision_vars[a][c].value * column["claims"][t]
+                    expected_claims_t.append(expr)
+
+                if self.fairness_type == "variance":
+                    grad_t = variance_penalty_gradient(expected_claims_t)
+                else:
+                    raise NotImplementedError("Only variance fairness implemented in gradient")
+
+                gradients.append(grad_t)
+
+            # Per-agent gradients across timesteps
+            for a in range(self.num_agents):
+                agent_grad = np.array([gradients[t][a] for t in range(self.horizon)])
+                gradients_per_agent.append(agent_grad)
+
+        elif self.fairness_scope == "cumulative":
+            # Cumulative fairness gradients
+            expected_cumulative_claims = []
             for a in range(self.num_agents):
                 expr = 0
                 for c, column in enumerate(self.agents[a].get_columns()):
-                    expr += self.decision_vars[a][c].value * column["claims"][t]
-                expected_claims_t.append(expr)
+                    expr += self.decision_vars[a][c].value * sum(column["claims"])
+                expected_cumulative_claims.append(expr)
 
-            # Compute fairness gradients for this timestep
             if self.fairness_type == "variance":
-                grad_t = variance_penalty_gradient(expected_claims_t)
+                grad_cumulative = variance_penalty_gradient(expected_cumulative_claims)
             else:
                 raise NotImplementedError("Only variance fairness implemented in gradient")
 
-            gradients.append(grad_t)
+            # Distribute same gradient to each timestep
+            for a in range(self.num_agents):
+                agent_grad = np.array([grad_cumulative[a]] * self.horizon)
+                gradients_per_agent.append(agent_grad)
 
-        # Now we convert per timestep gradients into per-agent gradient vector
-        gradients_per_agent = []
-        for a in range(self.num_agents):
-            agent_grad = np.array([gradients[t][a] for t in range(self.horizon)])
-            gradients_per_agent.append(agent_grad)
+        else:
+            raise ValueError("Unknown fairness_scope option")
+
         return gradients_per_agent
 
     def get_dual_prices(self):
@@ -134,3 +172,31 @@ class MasterProblem:
                 weights /= np.sum(weights)
             distributions.append(weights)
         return distributions
+    
+    def compute_realized_fairness_penalty(self):
+        if self.fairness_scope == "timestep":
+            penalty = 0.0
+            for t in range(self.horizon):
+                claims_t = []
+                for a in range(self.num_agents):
+                    val = 0.0
+                    for c, column in enumerate(self.agents[a].get_columns()):
+                        prob = self.decision_vars[a][c].value
+                        val += prob * column["claims"][t]
+                    claims_t.append(val)
+            # Compute variance using actual numerical values
+                penalty += variance_penalty_numpy(claims_t)
+            return penalty
+
+        elif self.fairness_scope == "cumulative":
+            claims = []
+            for a in range(self.num_agents):
+                val = 0.0
+                for c, column in enumerate(self.agents[a].get_columns()):
+                    prob = self.decision_vars[a][c].value
+                    val += prob * np.sum(column["claims"])
+                claims.append(val)
+            return variance_penalty_numpy(claims)
+
+        else:
+            raise ValueError("Unknown fairness_scope")

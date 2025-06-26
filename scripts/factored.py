@@ -9,14 +9,22 @@ from env.resource_mdp_env import ResourceMDPEnv
 from util.plotting import plot_min_rc_history_all_seeds, plot_average_expected_claims, plot_fairness_sweep
 
 def main():
+    FAIRNESS_SCOPE = "timestep"  # or "cumulative"
     FAIRNESS_METRICS = ["jain", "nsw", "minshare", "gini", "variance"]
     fairness_scores_dict = {metric: [] for metric in FAIRNESS_METRICS}
-    lambda_values = [1, 5, 10, 25, 50, 100, 200, 400, 600]
+    fairness_scores_dict['return'] = []
+    lambda_values = [0, 1, 5, 10, 25, 50, 100, 200, 400, 600, 1000]
     for lambda_fair in lambda_values:
-        horizon = 5
         num_episodes = 1
         max_column_generation_rounds = 25000
+        verbose = False
+
+        horizon = 5
         num_agents = 5
+        resource_capacity = 3
+        seeds = range(5)
+
+
         reward_profile = {
             0: (1, 5),  # Agent 0 gets rewards
             1: (1, 5),  # Agent 1 gets rewards
@@ -34,20 +42,7 @@ def main():
 
         if len(reward_profile) != num_agents:
             raise ValueError(f"Reward profile length {len(reward_profile)} does not match number of agents {num_agents}.")
-        seeds = range(5)
-        verbose = False
-        FAIRNESS_ENABLED = True  # Toggle fairness constraint here
-        FAIRNESS_METRICS = ["jain", "nsw", "minshare", "gini", "variance"]
-        if FAIRNESS_ENABLED:
-            LANGRANGIAN_ENABLED = True  # Toggle Langranian relaxation here
-            LAMBDA_FAIR = lambda_fair  # Tune this
-        else:
-            LANGRANGIAN_ENABLED = False
-            LAMBDA_FAIR = None
 
-        out_dir = os.path.join('results', os.path.basename(__file__).split('.')[0])
-
-        resource_capacity = 3
 
         env = ResourceMDPEnv(
             n_agents=num_agents,
@@ -72,27 +67,27 @@ def main():
                     verbose=verbose,
                     reward_profile=reward_profile,
                     cost_profile=cost_profile,
-                    langrangian_weight=LAMBDA_FAIR if LANGRANGIAN_ENABLED else None
+                    langrangian_weight=lambda_fair
                 )
                 agents.append(agent)
 
             # Train with master coordination
             print(f"Running column generation experiment for seed {seed}")
-            metrics, min_rc_history, agent_expected_claims  = train_agents_with_dynamic_master(env, agents, num_episodes, verbose=verbose, max_column_generation_rounds=max_column_generation_rounds, fairness=FAIRNESS_ENABLED, langrangian=LANGRANGIAN_ENABLED, langrangian_weight=LAMBDA_FAIR, seed=seed, fairness_metrics=FAIRNESS_METRICS)
+            metrics, min_rc_history, agent_expected_claims  = train_agents_with_dynamic_master(env, agents, num_episodes, verbose=verbose, max_column_generation_rounds=max_column_generation_rounds, langrangian_weight=lambda_fair, fairness_metrics=FAIRNESS_METRICS, fairness_scope=FAIRNESS_SCOPE)
             print(f"Metrics for seed {seed}: {metrics}")
             all_metrics.append(metrics)
             all_min_rc_histories.append(min_rc_history)
             all_agent_expected_claims.append(agent_expected_claims)
-        with open(os.path.join('results', f"min_rc_history_all_seeds_(fairness={FAIRNESS_ENABLED},lambda={LAMBDA_FAIR}).json"), "w") as f:
+        with open(os.path.join('results', f"min_rc_history_all_seeds_({FAIRNESS_SCOPE},lambda={lambda_fair}).json"), "w") as f:
             json.dump(all_min_rc_histories, f)
         # Combine metrics into one DataFrame
         dfs = [pd.DataFrame(m) for m in all_metrics]
         combined_df = pd.concat(dfs, ignore_index=True)
 
         # Write full combined metrics
-        combined_df.to_csv(os.path.join('results', f"metrics_combined_all_seeds_(fairness={FAIRNESS_ENABLED},lambda={LAMBDA_FAIR}).csv"), index=False)
-        plot_min_rc_history_all_seeds(result_dir='results', fairness=FAIRNESS_ENABLED, lambda_fair=LAMBDA_FAIR)
-        plot_average_expected_claims(all_agent_expected_claims, out_dir="results\plots", fairness=FAIRNESS_ENABLED, lambda_fair=LAMBDA_FAIR)
+        combined_df.to_csv(os.path.join('results', f"metrics_combined_all_seeds_({FAIRNESS_SCOPE},lambda={lambda_fair}).csv"), index=False)
+        plot_min_rc_history_all_seeds(result_dir='results', lambda_fair=lambda_fair, fairness_scope=FAIRNESS_SCOPE)
+        plot_average_expected_claims(all_agent_expected_claims, out_dir="results\plots", lambda_fair=lambda_fair, fairness_scope=FAIRNESS_SCOPE)
         # Compute average fairness scores across seeds for this lambda
         averages_per_metric = {}
 
@@ -103,11 +98,35 @@ def main():
             avg_value = np.mean(values)
             averages_per_metric[metric] = avg_value
 
+        for m in all_metrics:
+            values.append(m[f'expected_return'][0])  # Since num_episodes = 1
+        avg_value = np.mean(values)
+        averages_per_metric['return'] = avg_value
+
+        fairness_scores_dict['return'].append(averages_per_metric['return'])
+
         # Append to the global dictionary
         for metric in FAIRNESS_METRICS:
             fairness_scores_dict[metric].append(averages_per_metric[metric])
+        
+    
+    # Now normalize returns:
+    returns = fairness_scores_dict['return']
+    min_return = 0
+    max_return = max(returns)
+
+    if max_return != min_return:
+        normalized_returns = [(r - min_return) / (max_return - min_return) for r in returns]
+    else:
+        normalized_returns = [0.5 for r in returns]
+
+    fairness_scores_dict['return_normalized'] = normalized_returns
+
+    # Delete the original 'return' key
+    del fairness_scores_dict['return']
+
     # Finally plot full sweep
-    plot_fairness_sweep(lambda_values, fairness_scores_dict, out_dir="results")
+    plot_fairness_sweep(lambda_values, fairness_scores_dict, out_dir="results", fairness_scope=FAIRNESS_SCOPE)
 
 
 if __name__ == '__main__':

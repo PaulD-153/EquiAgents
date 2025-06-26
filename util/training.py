@@ -6,7 +6,10 @@ from matplotlib import pyplot as plt
 from planners.master_problem import MasterProblem
 
 
-def compute_fairness_score(values, fairness_type):
+def compute_fairness_score(values, fairness_type, fairness_scope='timestep', horizon=None):
+    if fairness_scope == 'cumulative':
+        values = np.array(values) / horizon 
+
     if fairness_type == "jain":
         numerator = (np.sum(values)) ** 2
         denominator = len(values) * np.sum(values ** 2)
@@ -28,18 +31,10 @@ def compute_fairness_score(values, fairness_type):
     else:
         raise ValueError(f"Unknown fairness type: {fairness_type}")
 
-def evaluate_all_fairness(values, fairness_metrics):
-    scores = {}
-    for fairness_type in fairness_metrics:
-        score = compute_fairness_score(values, fairness_type)
-        scores[fairness_type] = score
-    return scores
-
 def train_agents_with_dynamic_master(env, agents, number_of_episodes, max_column_generation_rounds=5, verbose=True,
-                                      fairness=False, langrangian=False, langrangian_weight=None,
-                                      fairness_type='variance', seed=None, fairness_metrics=None):
+                                      langrangian_weight=None, fairness_metrics=None, fairness_scope='timestep'):
 
-    metrics = {'master_value': [], 'expected_return': [], 'optimal usage': [], 'min_rc': []}
+    metrics = {'fairness_impact': [], 'expected_return': [], 'optimal usage': [], 'min_rc': []}
     min_rc_history = []
 
     for fairness_eval in fairness_metrics:
@@ -55,17 +50,17 @@ def train_agents_with_dynamic_master(env, agents, number_of_episodes, max_column
             agent.columns = agent.generate_candidate_columns()
 
         round_idx = 0
+
         while True:
             master = MasterProblem(agents, resource_capacity=env.resource_capacity,
-                                    fairness=fairness,
-                                    langrangian=langrangian, langrangian_weight=langrangian_weight)
-            master_value, _ = master.solve()
+                                   langrangian_weight=langrangian_weight, fairness_scope=fairness_scope)
+            master_value, _, fairness_impact = master.solve()
 
             if master.lp.status not in ["optimal", "optimal_inaccurate"]:
                 print(f"Master LP not feasible at round {round_idx}")
                 break
 
-            if langrangian:
+            if langrangian_weight > 0:
                 fairness_gradients_per_agent = master.compute_fairness_gradients()
             else:
                 fairness_gradients_per_agent = [np.zeros(env.max_steps) for _ in range(len(agents))]
@@ -116,16 +111,23 @@ def train_agents_with_dynamic_master(env, agents, number_of_episodes, max_column
         if episode == number_of_episodes - 1:
             agent_expected_claims = np.mean(expected_claims_per_timestep, axis=0)
 
+        # Compute cumulative claims
+        cumulative_claims = np.sum(expected_claims_per_timestep, axis=0)
+
         for fairness_eval in fairness_metrics:
-            fairness_values = [
-                compute_fairness_score(expected_claims_per_timestep[t], fairness_type=fairness_eval)
-                for t in range(env.max_steps)]
-            metrics[f'expected_fairness_{fairness_eval}'].append(np.mean(fairness_values))
+            if fairness_scope == "cumulative":
+                fairness_value = compute_fairness_score(cumulative_claims, fairness_type=fairness_eval, fairness_scope=fairness_scope, horizon=env.max_steps)
+                metrics[f'expected_fairness_{fairness_eval}'].append(fairness_value)
+            elif fairness_scope == "timestep":
+                fairness_values = [
+                    compute_fairness_score(expected_claims_per_timestep[t], fairness_type=fairness_eval, fairness_scope=fairness_scope, horizon=env.max_steps)
+                    for t in range(env.max_steps)]
+                metrics[f'expected_fairness_{fairness_eval}'].append(np.mean(fairness_values))
 
         optimal_usage_score = np.sum(expected_claims_per_timestep) / (env.resource_capacity * env.max_steps)
         metrics['optimal usage'].append(optimal_usage_score)
         metrics['expected_return'].append(total_expected_reward)
-        metrics['master_value'].append(master_value)
+        metrics['fairness_impact'].append(fairness_impact)
         metrics['min_rc'].append(min_rc)
         min_rc_history.append(rc_per_episode)
 

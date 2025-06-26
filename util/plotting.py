@@ -3,8 +3,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import os
 
-def plot_min_rc_history_all_seeds(result_dir, fairness, lambda_fair=None):
-    filename = f"min_rc_history_all_seeds_(fairness={fairness},lambda={lambda_fair}).json"
+def plot_min_rc_history_all_seeds(result_dir, lambda_fair=None, fairness_scope='timestep'):
+    filename = f"min_rc_history_all_seeds_({fairness_scope},lambda={lambda_fair}).json"
     filepath = os.path.join(result_dir, filename)
     
     with open(filepath, 'r') as f:
@@ -32,13 +32,13 @@ def plot_min_rc_history_all_seeds(result_dir, fairness, lambda_fair=None):
     plt.legend()
     plt.tight_layout()
     
-    output_path = os.path.join(result_dir, f"plots\min_rc_convergence_all_seeds_(fairness={fairness},lambda={lambda_fair}).png")
+    output_path = os.path.join(result_dir, f"plots\min_rc_convergence_all_seeds_({fairness_scope},lambda={lambda_fair}).png")
     plt.savefig(output_path)
     plt.close()
     print(f"Saved combined min_rc convergence plot to {output_path}")
 
 
-def plot_average_expected_claims(all_agent_expected_claims, out_dir="results", fairness=False, lambda_fair=None):
+def plot_average_expected_claims(all_agent_expected_claims, out_dir="results", lambda_fair=None, fairness_scope='timestep'):
     """
     Plots average expected claims per agent across seeds.
     
@@ -61,12 +61,12 @@ def plot_average_expected_claims(all_agent_expected_claims, out_dir="results", f
     plt.grid(True)
     plt.tight_layout()
 
-    filename = os.path.join(out_dir, f"expected_claims_average_all_seeds_(fairness={fairness},lambda={lambda_fair}).png")
+    filename = os.path.join(out_dir, f"expected_claims_average_all_seeds_({fairness_scope},lambda={lambda_fair}).png")
     plt.savefig(filename)
     plt.close()
     print(f"Saved average expected claims plot to {filename}")
 
-def plot_fairness_sweep(lambda_values, fairness_scores_dict, out_dir="results"):
+def plot_fairness_sweep(lambda_values, fairness_scores_dict, out_dir="results", fairness_scope='timestep'):
     """
     Plot fairness metrics over different Lagrangian weights (lambda_fair).
     
@@ -88,7 +88,7 @@ def plot_fairness_sweep(lambda_values, fairness_scores_dict, out_dir="results"):
     plt.grid(True)
     plt.tight_layout()
 
-    filename = os.path.join(out_dir, "fairness_vs_lambda.png")
+    filename = os.path.join(out_dir, f"plots/fairness_vs_lambda-{fairness_scope}.png")
     plt.savefig(filename)
     plt.close()
     print(f"Saved fairness sweep plot to {filename}")
