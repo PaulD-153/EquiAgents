@@ -160,12 +160,12 @@ class DecentralizedAgentWithColumns:
         constraints = [claim_vars >= 0, claim_vars <= 1]
         problem = cv.Problem(objective, constraints)
 
-        print(f"[Agent {self.agent_id}] Round RC check")
-        print(f"  cost_vector:    {np.round(cost_vector, 3)}")
-        print(f"  reward_vector:  {np.round(reward_vector, 3)}")
-        print(f"  dual_prices:    {np.round(total_dual, 3)}")
-        print(f"  fairness_grad:  {np.round(fairness_duals, 3)}")
-        print(f"  adjusted_reward:{np.round(adjusted_reward, 3)}")
+        # print(f"[Agent {self.agent_id}] Round RC check")
+        # print(f"  cost_vector:    {np.round(cost_vector, 3)}")
+        # print(f"  reward_vector:  {np.round(reward_vector, 3)}")
+        # print(f"  dual_prices:    {np.round(total_dual, 3)}")
+        # print(f"  fairness_grad:  {np.round(fairness_duals, 3)}")
+        # print(f"  adjusted_reward:{np.round(adjusted_reward, 3)}")
 
         problem.solve()
 

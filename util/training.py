@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
 from planners.master_problem import MasterProblem
+from tqdm import tqdm
 
 
 def compute_fairness_score(values, fairness_type, fairness_scope='timestep', horizon=None):
@@ -76,7 +77,8 @@ def train_agents_with_dynamic_master(env, agents, number_of_episodes, max_column
 
             reduced_costs = [rc for _, rc in new_columns]
             min_rc = min(reduced_costs)
-            print(f"Round {round_idx}: min reduced cost {min_rc:.6f}")
+            if verbose:
+                print(f"Round {round_idx}: min reduced cost {min_rc:.6f}")
 
             rc_per_episode.append(min_rc)
 
@@ -131,5 +133,68 @@ def train_agents_with_dynamic_master(env, agents, number_of_episodes, max_column
         metrics['min_rc'].append(min_rc)
         min_rc_history.append(rc_per_episode)
 
-        print(f"Finished episode {episode+1}: expected_return={total_expected_reward:.2f}, master_value={master_value:.2f}, usage={optimal_usage_score:.2f}")
+        # print(f"Finished episode {episode+1}: expected_return={total_expected_reward:.2f}, master_value={master_value:.2f}, usage={optimal_usage_score:.2f}")
     return metrics, min_rc_history, agent_expected_claims
+
+# --- in util/training.py (or wherever you like) ------------------------------
+
+def tune_log_lambda(build_env_agents_fn,
+                    target_fairness,
+                    metric="jain",
+                    scope="timestep",
+                    log10_min=-4,
+                    log10_max=4,
+                    tol=0.01,
+                    max_iter=20,
+                    num_eps=3,
+                    verbose=True):
+    """
+    Binary‐search (in log‐λ) to hit target_fairness ± tol.
+
+    build_env_agents_fn: fn(lambda) -> (env, agents)
+    target_fairness: desired fairness level (e.g. 0.90)
+    metric: one of your fairness_metrics
+    scope: "timestep" or "cumulative"
+    log10_min, log10_max: search λ ∈ [10**log10_min, 10**log10_max]
+    tol: acceptable fairness error
+    max_iter: maximum # of bisections
+    num_eps: how many repeated runs to average out noise
+    """
+    history = []
+    δ = 1e-8
+
+    lo, hi = log10_min, log10_max
+    for i in range(max_iter):
+        mid = 0.5*(lo + hi)
+        lam = 10**mid
+
+        # average fairness over num_eps runs
+        total_f = 0.0
+        for _ in range(num_eps):
+            env, agents = build_env_agents_fn(lam)
+            metrics, *_ = train_agents_with_dynamic_master(
+                env, agents,
+                number_of_episodes=5,
+                max_column_generation_rounds=2500,
+                langrangian_weight=lam,
+                fairness_metrics=[metric],
+                fairness_scope=scope,
+                verbose=False
+            )
+            total_f += metrics[f'expected_fairness_{metric}'][-1]
+        f_mid = total_f/num_eps
+        history.append((lam, f_mid))
+
+        if verbose:
+            print(f"[{i:02d}] λ=10^{mid:.3f}≈{lam:.4g} → {metric}={f_mid:.4f}")
+
+        if abs(f_mid - target_fairness) <= tol:
+            break
+
+        # monotonic: if f<target, increase λ
+        if f_mid < target_fairness:
+            lo = mid
+        else:
+            hi = mid
+
+    return lam, f_mid, history

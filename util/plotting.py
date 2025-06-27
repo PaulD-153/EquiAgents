@@ -92,3 +92,34 @@ def plot_fairness_sweep(lambda_values, fairness_scores_dict, out_dir="results", 
     plt.savefig(filename)
     plt.close()
     print(f"Saved fairness sweep plot to {filename}")
+
+
+def plot_lambda_vs_fairness(history, target=None, out_path=None):
+    """
+    history: list of (lambda, fairness)
+    """
+    lams, fs = zip(*history)
+    its = list(range(len(lams)))
+
+    fig, (ax1, ax2) = plt.subplots(2,1, figsize=(6,6))
+
+    # λ on a log‐scale
+    ax1.plot(its, lams, marker='o')
+    ax1.set_yscale('log')
+    ax1.set_xlabel("Iteration")
+    ax1.set_ylabel("λ (log scale)")
+    ax1.set_title("Search λ over iterations")
+
+    # fairness
+    ax2.plot(its, fs, marker='o')
+    if target is not None:
+        ax2.axhline(target, ls="--", color="gray", label=f"target={target}")
+        ax2.legend()
+    ax2.set_xlabel("Iteration")
+    ax2.set_ylabel("Fairness")
+    ax2.set_title("Fairness vs λ-iteration")
+
+    plt.tight_layout()
+    if out_path:
+        plt.savefig(out_path)
+    plt.show()
