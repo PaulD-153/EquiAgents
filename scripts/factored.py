@@ -3,10 +3,9 @@ import numpy as np
 import pandas as pd
 import json
 
-from agents.abs_opt_cmdp import DecentralizedAgentWithColumns
-from util.training import train_agents_with_dynamic_master
-from env.resource_mdp_env import ResourceMDPEnv
-from util.plotting import plot_min_rc_history_all_seeds, plot_average_expected_claims, plot_fairness_sweep
+from util.build_mdp import build_env_and_agents
+from util.training import train_agents_with_dynamic_master, tune_log_lambda
+from util.plotting import plot_min_rc_history_all_seeds, plot_average_expected_claims, plot_fairness_sweep, plot_lambda_vs_fairness
 
 def main():
     FAIRNESS_SCOPE = "timestep"  # or "cumulative"
@@ -15,7 +14,7 @@ def main():
     fairness_scores_dict['return'] = []
     lambda_values = [0, 1, 5, 10, 25, 50, 100, 200, 400, 600, 1000]
     for lambda_fair in lambda_values:
-        num_episodes = 1
+        num_episodes = 5
         max_column_generation_rounds = 25000
         verbose = False
 
@@ -26,11 +25,11 @@ def main():
 
 
         reward_profile = {
-            0: (1, 5),  # Agent 0 gets rewards
-            1: (1, 5),  # Agent 1 gets rewards
-            2: (1, 5),  # Agent 2 gets rewards
-            3: (50, 100),  # Agent 3 gets higher rewards
-            4: (1, 5)   # Agent 4 gets rewards
+            0: (5, 5),  # Agent 0 gets rewards
+            1: (5, 5),  # Agent 1 gets rewards
+            2: (5, 5),  # Agent 2 gets rewards
+            3: (100, 100),  # Agent 3 gets higher rewards
+            4: (5, 5)   # Agent 4 gets rewards
         }
         cost_profile = {
             0: (1, 1),  # Agent 0 has costs
@@ -44,32 +43,13 @@ def main():
             raise ValueError(f"Reward profile length {len(reward_profile)} does not match number of agents {num_agents}.")
 
 
-        env = ResourceMDPEnv(
-            n_agents=num_agents,
-            resource_capacity=resource_capacity,
-            max_steps=horizon,
-            reward_profile=reward_profile
-        )
         all_metrics = []
         all_min_rc_histories = []
         all_agent_expected_claims = []
         for seed in seeds:
             np.random.seed(seed)
 
-            # Instantiate decentralized agents
-            agents = []
-            for agent_id in range(num_agents):
-                agent = DecentralizedAgentWithColumns(
-                    agent_id=agent_id,
-                    horizon=horizon,
-                    resource_capacity=resource_capacity,
-                    num_columns=3,
-                    verbose=verbose,
-                    reward_profile=reward_profile,
-                    cost_profile=cost_profile,
-                    langrangian_weight=lambda_fair
-                )
-                agents.append(agent)
+            env, agents = build_env_and_agents(horizon, num_agents, resource_capacity, reward_profile, cost_profile, lambda_fair)
 
             # Train with master coordination
             print(f"Running column generation experiment for seed {seed}")
@@ -127,6 +107,30 @@ def main():
 
     # Finally plot full sweep
     plot_fairness_sweep(lambda_values, fairness_scores_dict, out_dir="results", fairness_scope=FAIRNESS_SCOPE)
+
+
+    build_fn = lambda lambda_val: build_env_and_agents(horizon, num_agents, resource_capacity, reward_profile, cost_profile, lambda_val)
+
+    target = 0.98
+    lam_star, f_star, hist = tune_log_lambda(
+        build_fn,
+        target_fairness=target,
+        metric="jain",
+        scope="timestep",
+        log10_min=-4,     # λ from 1e-4
+        log10_max=4,      #       to 1e4
+        tol=0.001,        # within 0.5%
+        max_iter=20,
+        num_eps=5,        # average over 5 runs
+        verbose=True
+    )
+
+    print(f"\n→ Converged: λ≈{lam_star:.4f}, fairness≈{f_star:.4f}")
+    plot_lambda_vs_fairness(hist, target=target,
+                            out_path="results/plots/lambda_search.png")
+
+
+
 
 
 if __name__ == '__main__':

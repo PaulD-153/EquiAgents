@@ -92,8 +92,8 @@ class MasterProblem:
         self.lp = cv.Problem(objective, constraints)
         self.lp.solve(verbose=False)
 
-        print("Master LP Status:", self.lp.status)
-        print("Master LP Objective Value:", self.lp.value)
+        # print("Master LP Status:", self.lp.status)
+        # print("Master LP Objective Value:", self.lp.value)
 
         # Compute fairness gradients after solving
         fairness_gradients_per_agent = self.compute_fairness_gradients()
