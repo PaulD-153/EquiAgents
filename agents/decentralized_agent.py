@@ -11,15 +11,14 @@ class DecentralizedAgentWithColumns:
     def __init__(self,
                  agent_id,
                  horizon,
-                 # resource_capacity no longer needed here; planner enforces it
-                 num_columns=5,
                  verbose=True,
                  reward_profile: Dict[int, tuple] = None,
                  cost_profile: Dict[int, tuple] = None,
-                 langrangian_weight=1.0):
+                 langrangian_weight=1.0,
+                 beta: float = 2.0,
+                 cost_weight: float = 1.0):
         self.agent_id = agent_id
         self.horizon = horizon
-        self.num_columns = num_columns
         self.verbose = verbose
         self.columns = []
         self.selected_plan = None
@@ -30,13 +29,16 @@ class DecentralizedAgentWithColumns:
 
         self.reward_profile = reward_profile or {agent_id: (0.3, 1.0)}  # default fallback
         self.fixed_reward_vector = None
-        self.cost_profile = cost_profile or {agent_id: (0.0, 1.0)}  # default fallback
-        self.fixed_cost_vector = None
+        self.cost_profile = cost_profile or {agent_id: (0.0, 1.0)}
+        # β controls surge‐pricing: cost multiplier = 1 + β·1_{sL==2}
+        self.beta = beta
         self.langrangian_weight = langrangian_weight
+        self.cost_weight = cost_weight  # α in the paper, used to scale costs
 
         # Provide default state‐dependent reward/cost functions
         self.reward_fn = lambda t, sL: np.random.uniform(*self.reward_profile[self.agent_id])
-        self.cost_fn   = lambda t, sL: np.random.uniform(*self.cost_profile[self.agent_id])
+        self.cost_fn   = lambda t, sL: np.random.uniform(*self.cost_profile[self.agent_id]) \
+                                      * (1.0 + self.beta * (sL == 2))
  
 
         self.episode = 0
@@ -49,110 +51,22 @@ class DecentralizedAgentWithColumns:
             low, high = self.reward_profile.get(self.agent_id)
             self.fixed_reward_vector = np.random.uniform(low=low, high=high, size=self.horizon)
         
-        if self.fixed_cost_vector is None:
-            low, high = self.cost_profile.get(self.agent_id)
-            self.fixed_cost_vector = np.random.uniform(low=low, high=high, size=self.horizon)
+        # 1) do‐nothing column (always safe, zero cost/reward)
+        zero = [0.0]*self.horizon
+        self.columns.append({"claims": zero, "reward": np.zeros(self.horizon)})
 
-        # Add a "do nothing" fallback column (ensures feasibility)
-        zero_claim_plan = [0.0 for _ in range(self.horizon)]
-        zero_reward_vector = np.zeros(self.horizon)
+        # 2) greedy “claim whenever it’s profitable” column
+        #    compare reward_fn(t,sL) vs. cost_weight * cost_fn(t,sL)
+        greedy = []
+        for t in range(self.horizon):
+            r_t = self.reward_fn(t, self.SL_traj[t]) if self.SL_traj else np.mean(self.reward_profile[self.agent_id])
+            c_t = self.cost_fn(t, self.SL_traj[t]) if self.SL_traj else np.mean(self.cost_profile[self.agent_id])
+            # claim only if expected net reward positive
+            greedy.append(1.0 if r_t - self.cost_weight*c_t > 0 else 0.0)
+        self.columns.append({"claims": greedy, "reward": self.fixed_reward_vector})
 
-        self.columns.append({
-            "claims": zero_claim_plan,
-            "reward": zero_reward_vector
-        })
 
         return self.columns
-
-
-    def generate_new_column_based_on_feedback(self, dual_prices, fairness_duals=None):
-        """
-        Use dual prices to construct a new plan via LP:
-        maximize sum((reward - dual) * claim)
-        s.t. claim in [0, 1]
-        """
-        reward_vector = self.fixed_reward_vector
-        cost_vector = self.fixed_cost_vector 
-
-        # Combine fairness and congestion duals (optional)
-        total_dual = np.array(dual_prices, dtype=float)
-        if fairness_duals is not None:
-            fairness_duals = np.array(fairness_duals, dtype=float)
-            total_dual += fairness_duals  # simple additive for now
-
-        # LP variables: claim probabilities per timestep
-        claim_vars = cv.Variable(self.horizon)
-
-        # Objective: weighted reward - dual penalty
-        print(f"Agent {self.agent_id} dual prices: {total_dual}")
-        if len(total_dual) != self.horizon:
-            print(f"[Warning] total_dual length {len(total_dual)} != horizon {self.horizon}, defaulting to 1s.")
-            total_dual = np.ones(self.horizon)
-        adjusted_value = reward_vector - cost_vector * total_dual
-
-        objective = cv.Maximize(cv.sum(cv.multiply(adjusted_value, claim_vars)))
-
-        constraints = [
-            claim_vars >= 0,
-            claim_vars <= 1,
-        ]
-
-        problem = cv.Problem(objective, constraints)
-        problem.solve()
-
-        if self.verbose:
-            print(f"[Agent {self.agent_id}] LP column gen status: {problem.status}")
-
-        plan = claim_vars.value.tolist()
-        plan = [max(0.0, min(1.0, p)) for p in plan]  # clip to [0,1] just in case
-        print(f"Agent {self.agent_id} generated plan: {plan}")
-        print(f"Agent {self.agent_id} generated reward: {reward_vector}")
-        self.columns.append({
-            "claims": plan,
-            "reward": reward_vector  # Store reward separately
-        })
-
-
-        if self.verbose:
-            print(f"[Agent {self.agent_id}] Generated plan with duals {dual_prices}: {plan}")
-
-
-
-    def generate_lp_column(self, penalty_weight=0.1):
-        """
-        Generate a reward-maximizing initial plan using LP:
-        maximize ∑ (reward_t - penalty_weight) * claim_t
-        s.t. claim_t ∈ [0,1]
-        """
-        claim_vars = cv.Variable(self.horizon)
-        
-        # Get reward vector for this agent (external reward)
-        low, high = self.reward_profile.get(self.agent_id)
-        reward_vector = np.random.uniform(low=low, high=high, size=self.horizon)
-
-        # Penalize claiming to avoid greedy overclaiming (encourages diversity)
-        objective = cv.Maximize(cv.sum(cv.multiply(reward_vector, claim_vars)) - penalty_weight * cv.sum(claim_vars))
-        
-        constraints = [
-            claim_vars >= 0,
-            claim_vars <= 1
-        ]
-
-        problem = cv.Problem(objective, constraints)
-        problem.solve()
-
-        if self.verbose:
-            print(f"[Agent {self.agent_id}] LP column gen status: {problem.status}")
-            print(f"[Agent {self.agent_id}] Reward vector: {reward_vector}")
-            print(f"[Agent {self.agent_id}] Generated plan: {claim_vars.value}")
-
-        # Clip just in case of numerical error
-        plan = np.clip(claim_vars.value, 0.0, 1.0).tolist()
-
-        self.columns.append({
-            "claims": plan,
-            "reward": reward_vector  # Needed for expected reward computation
-        })
 
     def generate_best_response_column(self, dual_prices, fairness_duals=None):
         # Build per‐timestep reward & cost based on SL_traj if available,
@@ -162,11 +76,9 @@ class DecentralizedAgentWithColumns:
             else np.random.uniform(*self.reward_profile[self.agent_id])
             for t in range(self.horizon)
         ])
-        cost_vector = np.array([
-            self.cost_fn(t, self.SL_traj[t]) if len(self.SL_traj) == self.horizon
-            else np.random.uniform(*self.cost_profile[self.agent_id])
-            for t in range(self.horizon)
-        ])
+        # Build the cost vector on the fly, using surge-pricing via cost_fn
+        cost_vector = np.array([ self.cost_fn(t, self.SL_traj[t])
+                                 for t in range(self.horizon) ])
         total_dual = np.array(dual_prices, dtype=float)
 
         if fairness_duals is None:
@@ -174,8 +86,13 @@ class DecentralizedAgentWithColumns:
         else:
             fairness_duals = np.array(fairness_duals, dtype=float)
 
-        # price out each timestep by its dual λ_t
-        adjusted_reward = reward_vector - cost_vector * total_dual
+        # price out each timestep by its dual λ_t, *and* scale cost by agent’s α
+        alpha = getattr(self, "cost_weight", 1.0)
+        adjusted_reward = (
+            reward_vector
+            - cost_vector * total_dual      # congestion price
+            - alpha       * cost_vector      # direct cost penalty
+            )
         # if you also want to penalize for unfairness:
         if self.langrangian_weight and fairness_duals is not None:
             adjusted_reward -= self.langrangian_weight * fairness_duals

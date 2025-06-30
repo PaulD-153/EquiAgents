@@ -2,16 +2,19 @@ import os
 import numpy as np
 import pandas as pd
 import json
-
+from skopt import gp_minimize
+from skopt.space import Real
 from util.build_mdp import build_env_and_agents
 from util.training import train_agents_with_dynamic_master, tune_log_lambda
-from util.plotting import plot_min_rc_history_all_seeds, plot_average_expected_claims, plot_fairness_sweep, plot_lambda_vs_fairness
+from util.plotting import plot_min_rc_history_all_seeds, plot_average_expected_claims, plot_fairness_sweep, plot_lambda_vs_fairness_history, plot_cost_history_all_seeds
+from util.evaluate import mc_evaluate_policy
 
 def main():
-    FAIRNESS_SCOPE = "timestep"  # or "cumulative"
+    FAIRNESS_SCOPE = "cumulative"  # or "cumulative"
     FAIRNESS_METRICS = ["jain", "nsw", "minshare", "gini", "variance"]
     fairness_scores_dict = {metric: [] for metric in FAIRNESS_METRICS}
     fairness_scores_dict['return'] = []
+    cost_scores = []  # to collect average costs across λ
 
     num_episodes = 5
     max_column_generation_rounds = 25000
@@ -53,7 +56,7 @@ def main():
             0: (1, 1),  # Agent 0 has costs
             1: (1, 1),  # Agent 1 has costs
             2: (1, 1),  # Agent 2 has costs
-            3: (1, 1),  # Agent 3 has higher costs
+            3: (1, 1),  # Agent 3 has costs
             4: (1, 1)   # Agent 4 has costs
         }
 
@@ -80,7 +83,31 @@ def main():
 
             # Train with master coordination
             print(f"Running column generation experiment for seed {seed}")
-            metrics, min_rc_history, agent_expected_claims  = train_agents_with_dynamic_master(env, agents, num_episodes, verbose=verbose, max_column_generation_rounds=max_column_generation_rounds, langrangian_weight=lambda_fair, fairness_metrics=FAIRNESS_METRICS, fairness_scope=FAIRNESS_SCOPE)
+            metrics, min_rc_history, cost_history, agent_expected_claims, saved_columns, saved_distributions = train_agents_with_dynamic_master(env, agents, num_episodes, verbose=verbose, max_column_generation_rounds=max_column_generation_rounds, langrangian_weight=lambda_fair, fairness_metrics=FAIRNESS_METRICS, fairness_scope=FAIRNESS_SCOPE, seed=seed)
+        
+
+            # Factories to rebuild env & agents from scratch (same config)
+            env_factory   = lambda: build_env_and_agents(
+                                horizon, num_agents, resource_capacity,
+                                reward_profile, cost_profile, lambda_fair,
+                                SL_states=SL_states, TL=TL, limit_fn=limit_fn
+                             )[0]
+            agent_factory = lambda: build_env_and_agents(
+                                horizon, num_agents, resource_capacity,
+                                reward_profile, cost_profile, lambda_fair,
+                                SL_states=SL_states, TL=TL, limit_fn=limit_fn
+                             )[1]
+        
+            eval_stats = mc_evaluate_policy(
+                env_factory,
+                agent_factory,
+                saved_columns,
+                saved_distributions,
+                num_rollouts=500
+            )
+            print(f"[MC EVAL] avg_return={eval_stats['avg_return']:.2f}, "
+                  f"violation_rate={eval_stats['capacity_violation_rate']:.3%}")
+        
             # Store SL trajectories for analysis
             all_SL_trajectories.append(env.sL_history)
             print(f"Metrics for seed {seed}: {metrics}")
@@ -99,7 +126,8 @@ def main():
         # Write full combined metrics
         combined_df.to_csv(os.path.join('results', f"metrics_combined_all_seeds_({FAIRNESS_SCOPE},lambda={lambda_fair}).csv"), index=False)
         plot_min_rc_history_all_seeds(result_dir='results', lambda_fair=lambda_fair, fairness_scope=FAIRNESS_SCOPE)
-        plot_average_expected_claims(all_agent_expected_claims, out_dir="results\plots", lambda_fair=lambda_fair, fairness_scope=FAIRNESS_SCOPE)
+        plot_cost_history_all_seeds(out_dir="results/plots", lambda_fair=lambda_fair, cost_history=cost_history, fairness_scope=FAIRNESS_SCOPE)
+        plot_average_expected_claims(all_agent_expected_claims, out_dir="results/plots", lambda_fair=lambda_fair, fairness_scope=FAIRNESS_SCOPE)
         # Compute average fairness scores across seeds for this lambda
         averages_per_metric = {}
 
@@ -141,27 +169,59 @@ def main():
     plot_fairness_sweep(lambda_values, fairness_scores_dict, out_dir="results", fairness_scope=FAIRNESS_SCOPE)
 
 
-    build_fn = lambda lambda_val: build_env_and_agents(horizon, num_agents, resource_capacity, reward_profile, cost_profile, lambda_val)
 
-    target = 0.98
-    lam_star, f_star, hist = tune_log_lambda(
-        build_fn,
-        target_fairness=target,
-        metric="jain",
-        scope="timestep",
-        log10_min=-4,     # λ from 1e-4
-        log10_max=4,      #       to 1e4
-        tol=0.001,        # within 0.5%
-        max_iter=20,
-        num_eps=5,        # average over 5 runs
-        verbose=True
+    # --- New: search for best λ to achieve target fairness ---
+
+    target_fairness = 0.95  # e.g. target Jain index
+    metric = "jain"  # or any other metric from FAIRNESS_METRICS
+    scope = FAIRNESS_SCOPE  # "timestep" or "cumulative"
+
+    bo_history = []  # will hold (lambda, fairness) pairs
+
+    def evaluate_fairness_at_lambda(lam: float) -> float:
+        """Build env+agents, run a few episodes, and return
+        the *negative* |fairness - target| (we’ll maximize closeness)."""
+        lam = lam[0]  # unpack from skopt's Real space
+        env, agents = build_env_and_agents(
+            horizon, num_agents, resource_capacity,
+            reward_profile, cost_profile,
+            lam, SL_states=SL_states, TL=TL, limit_fn=limit_fn
+        )
+        metrics, *_ = train_agents_with_dynamic_master(
+            env, agents,
+            number_of_episodes=5,
+            max_column_generation_rounds=2500,
+            langrangian_weight=lam,
+            fairness_metrics=[metric],
+            fairness_scope=scope,
+            verbose=False
+        )
+        f = metrics[f'expected_fairness_{metric}'][-1]
+        bo_history.append((lam, f))  # <— record the lambda and fairness value
+        return abs(f - target_fairness)
+
+    # define the 1-D search space over log₁₀ λ
+    search_space = [Real(1e-4, 1e4, prior="log-uniform", name="λ")]
+
+    res = gp_minimize(
+        func=evaluate_fairness_at_lambda,
+        dimensions=search_space,
+        n_calls=20,
+        random_state=0,
+        noise="gaussian",   # treat your fairness evals as noisy
+        acq_func="EI"       # expected improvement
     )
 
-    print(f"\n→ Converged: λ≈{lam_star:.4f}, fairness≈{f_star:.4f}")
-    plot_lambda_vs_fairness(hist, target=target,
-                            out_path="results/plots/lambda_search.png")
+    best_lam = res.x[0]
+    best_err = res.fun
+    print(f"→ BO found λ≈{best_lam:.4g}, error={best_err:.4f}")
 
-
+    plot_lambda_vs_fairness_history(
+    bo_history,
+    target=0.98,
+    metric="jain",
+    out_path="results/plots/lambda_vs_fairness.png"
+)
 
 
 

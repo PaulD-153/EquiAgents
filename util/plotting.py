@@ -3,6 +3,18 @@ import matplotlib.pyplot as plt
 import numpy as np
 import os
 
+def plot_cost_history_all_seeds(out_dir, lambda_fair, cost_history, fairness_scope):
+    plt.figure()
+    for seed_idx, ch in enumerate(cost_history):
+        plt.plot(ch, label=f'seed {seed_idx}', alpha=0.6)
+    plt.xlabel('Column‐generation round')
+    plt.ylabel('Expected cost')
+    plt.title(f'Cost history λ={lambda_fair} ({fairness_scope})')
+    plt.legend()
+    path = os.path.join(out_dir, f"cost_history_lambda={lambda_fair}.png")
+    plt.savefig(path)
+    plt.close()
+
 def plot_min_rc_history_all_seeds(result_dir, lambda_fair=None, fairness_scope='timestep'):
     filename = f"min_rc_history_all_seeds_({fairness_scope},lambda={lambda_fair}).json"
     filepath = os.path.join(result_dir, filename)
@@ -94,32 +106,37 @@ def plot_fairness_sweep(lambda_values, fairness_scores_dict, out_dir="results", 
     print(f"Saved fairness sweep plot to {filename}")
 
 
-def plot_lambda_vs_fairness(history, target=None, out_path=None):
+def plot_lambda_vs_fairness_history(history, target: float, metric: str, out_path: str):
     """
-    history: list of (lambda, fairness)
+    Plot how the fairness metric evolves as a function of lambda.
+
+    Args:
+        history: List of (lambda_value, fairness_value) tuples.
+        target:  The desired fairness target (e.g. 0.95).
+        metric:  Name of the fairness metric (e.g. "jain").
+        out_path: Path (including filename) to save the plot, e.g. "results/plots/lambda_vs_fairness.png".
     """
-    lams, fs = zip(*history)
-    its = list(range(len(lams)))
+    # unzip
+    lambdas, fairness_vals = zip(*history)
 
-    fig, (ax1, ax2) = plt.subplots(2,1, figsize=(6,6))
+    plt.figure()
+    plt.semilogx(lambdas, fairness_vals, marker='o', linestyle='-',
+                 label=f"{metric.capitalize()} vs λ")
+    # draw target line
+    plt.axhline(y=target, color='gray', linestyle='--',
+                label=f"target={target:.2f}")
+    # highlight best
+    best_idx = max(range(len(history)), key=lambda i: fairness_vals[i] >= target if isinstance(fairness_vals[i], (int,float)) else False)
+    best_lambda, best_fair = history[best_idx]
+    plt.scatter([best_lambda], [best_fair], color='red',
+                label=f"λ≈{best_lambda:.4g}")
 
-    # λ on a log‐scale
-    ax1.plot(its, lams, marker='o')
-    ax1.set_yscale('log')
-    ax1.set_xlabel("Iteration")
-    ax1.set_ylabel("λ (log scale)")
-    ax1.set_title("Search λ over iterations")
-
-    # fairness
-    ax2.plot(its, fs, marker='o')
-    if target is not None:
-        ax2.axhline(target, ls="--", color="gray", label=f"target={target}")
-        ax2.legend()
-    ax2.set_xlabel("Iteration")
-    ax2.set_ylabel("Fairness")
-    ax2.set_title("Fairness vs λ-iteration")
-
+    plt.xscale("log")
+    plt.xlabel("λ (log scale)")
+    plt.ylabel(f"{metric.capitalize()} fairness")
+    plt.title(f"Fairness ({metric}) vs λ")
+    plt.legend()
+    plt.grid(True, which="both", ls=":")
     plt.tight_layout()
-    if out_path:
-        plt.savefig(out_path)
-    plt.show()
+    plt.savefig(out_path)
+    plt.close()

@@ -88,14 +88,25 @@ class MasterProblem:
 
         for a, agent in enumerate(self.agents):
             for c, column in enumerate(agent.get_columns()):
-                reward = np.sum(column["reward"])
-                cost = np.sum(agent.fixed_cost_vector * column["claims"])  # new line
-                net_value = reward - cost  # optionally add a cost_weight factor
-                total_expected_reward += self.decision_vars[a][c] * net_value
+                # 1) total reward for column c
+                R = np.sum(column["reward"])
+
+                # 2) compute total cost by replaying the SL path
+                #    cost_fn(t, sL_t) already embeds your 1+β·1[sL==2] surge‐pricing
+                C = sum(
+                    agent.cost_fn(t, agent.SL_traj[t]) * column["claims"][t]
+                    for t in range(self.horizon)
+                )
+
+                # 3) apply per-agent cost weight α
+                alpha = getattr(agent, "cost_weight", 1.0)
+                net = R - alpha * C
+
+                total_expected_reward += self.decision_vars[a][c] * net
 
         objective = cv.Maximize(total_expected_reward)
         self.lp = cv.Problem(objective, constraints)
-        self.lp.solve(verbose=False)
+        self.lp.solve(verbose=False, solver="ECOS")  # Use ECOS solver for better performance
 
         # print("Master LP Status:", self.lp.status)
         # print("Master LP Objective Value:", self.lp.value)

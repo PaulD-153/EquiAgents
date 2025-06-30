@@ -28,15 +28,16 @@ def compute_fairness_score(values, fairness_type, fairness_scope='timestep', hor
     elif fairness_type == "variance":
         mean = np.mean(values)
         variance = np.mean((values - mean) ** 2)
-        return -variance
+        return variance
     else:
         raise ValueError(f"Unknown fairness type: {fairness_type}")
 
 def train_agents_with_dynamic_master(env, agents, number_of_episodes, max_column_generation_rounds=5, verbose=True,
-                                      langrangian_weight=None, fairness_metrics=None, fairness_scope='timestep'):
+                                      langrangian_weight=None, fairness_metrics=None, fairness_scope='timestep', seed=None):
 
     metrics = {'fairness_impact': [], 'expected_return': [], 'optimal usage': [], 'min_rc': []}
     min_rc_history = []
+    cost_history = []
 
     for fairness_eval in fairness_metrics:
         metrics[f'expected_fairness_{fairness_eval}'] = []
@@ -44,25 +45,41 @@ def train_agents_with_dynamic_master(env, agents, number_of_episodes, max_column
     for agent in agents:
         agent.reset()
 
+    # number of SL scenarios to average over
+    NUM_SCENARIOS = 5
     for episode in range(number_of_episodes):
-        # --- NEW: reset env & sample the SL‐chain for this episode ---
+        cost_per_episode = []
         rc_per_episode = []
         env.reset()
-        # env.sL_history was reset in the env; now sample full horizon
-        SL_traj = [env.sL_history[0]]
-        for t in range(env.max_steps):
-            p = env.TL[env.SL_states.index(SL_traj[-1])]
-            next_sL = np.random.choice(env.SL_states, p=p)
-            SL_traj.append(next_sL)
-        # drop the final entry so we have exactly max_steps states
-        SL_traj = SL_traj[:env.max_steps]
-        # build capacity schedule per timestep
+        # --- 1) sample K SL trajectories, build each capacity schedule ---
+        scenario_caps = []
+        scenario_SLs  = []
+        for k in range(NUM_SCENARIOS):
+            # start fresh for each scenario
+            sL_path = [env.SL_states[0]]
+            for t in range(env.max_steps):
+                p = env.TL[env.SL_states.index(sL_path[-1])]
+                sL_path.append(np.random.choice(env.SL_states, p=p))
+            sL_path = sL_path[:env.max_steps]
+            # capacity for this scenario
+            caps_k = [env.limit_fn(t, sL_t) for t, sL_t in enumerate(sL_path)]
+            scenario_SLs.append(sL_path)
+            scenario_caps.append(caps_k)
+
+        # --- 2) compute the expected capacity per timestep ---
+        # shape: (T,)
         capacity_schedule = [
-            env.limit_fn(t, sL_t) for t, sL_t in enumerate(SL_traj)
+            sum(scenario_caps[k][t] for k in range(NUM_SCENARIOS)) / NUM_SCENARIOS
+            for t in range(env.max_steps)
         ]
-        # --- NEW: let each agent know the SL trajectory for this episode ---
+
+        # (optional) record all sampled SL trajectories for diagnostics
+        # all_scenarios.append(scenario_SLs)
+
+        # expose one “representative” SL path to agents (for reward_fn, if needed)
+        rep_SL = scenario_SLs[0]
         for agent in agents:
-            agent.SL_traj = SL_traj
+            agent.SL_traj = rep_SL
             agent.capacity_schedule = capacity_schedule
 
         # now reset agent columns as before
@@ -72,6 +89,8 @@ def train_agents_with_dynamic_master(env, agents, number_of_episodes, max_column
         round_idx = 0
 
         while True:
+            # debug: show what capacities we’re enforcing this episode
+            print(f"[DEBUG] capacity_schedule: {capacity_schedule}")
             master = MasterProblem(
                 agents,
                 # keep base_capacity around if needed for fallback
@@ -86,6 +105,24 @@ def train_agents_with_dynamic_master(env, agents, number_of_episodes, max_column
             if master.lp.status not in ["optimal", "optimal_inaccurate"]:
                 print(f"Master LP not feasible at round {round_idx}")
                 break
+
+            # Compute expected raw cost for this round using cost_fn & SL_traj
+            dist = master.get_decision_distribution()
+            expected_cost_round = 0.0
+            for a, agent in enumerate(agents):
+                for c, column in enumerate(agent.columns):
+                    # sum over timesteps: cost_fn(t, sL) * claim_prob
+                    alpha = getattr(agent, "cost_weight", 1.0)
+                    cost_c = sum(
+                        agent.cost_fn(t, agent.SL_traj[t]) * column["claims"][t]
+                        for t in range(agent.horizon)
+                    )
+                    expected_cost_round += dist[a][c] * (alpha * cost_c)
+
+            
+            print(f"[Seed {seed}] Episode {episode}, Round {round_idx}: cost = {expected_cost_round:.4f}")
+
+            cost_per_episode.append(expected_cost_round)
 
             if langrangian_weight > 0:
                 fairness_gradients_per_agent = master.compute_fairness_gradients()
@@ -119,13 +156,21 @@ def train_agents_with_dynamic_master(env, agents, number_of_episodes, max_column
 
         # Compute expected reward (ignoring fairness penalty)
         total_expected_reward = 0
+        total_expected_cost = 0
         for a, agent in enumerate(agents):
             for c, column in enumerate(agent.columns):
                 reward = np.sum(column["reward"])
-                cost = np.sum(agent.fixed_cost_vector * column["claims"])
+                cost_c = sum(
+                    agent.cost_fn(t, agent.SL_traj[t]) * column["claims"][t]
+                    for t in range(agent.horizon)
+                )
                 prob = column_distributions[a][c]
-                net_value = reward - cost
+                net_value = reward - cost_c
                 total_expected_reward += prob * net_value
+                total_expected_cost += prob * cost_c
+
+        # Log cost as a new metric
+        metrics.setdefault('expected_cost', []).append(total_expected_cost)
 
         # Compute expected claims for fairness metrics
         expected_claims_per_timestep = np.zeros((env.max_steps, len(agents)))
@@ -158,9 +203,12 @@ def train_agents_with_dynamic_master(env, agents, number_of_episodes, max_column
         metrics['fairness_impact'].append(fairness_impact)
         metrics['min_rc'].append(min_rc)
         min_rc_history.append(rc_per_episode)
+        cost_history.append(cost_per_episode)
 
-        # print(f"Finished episode {episode+1}: expected_return={total_expected_reward:.2f}, master_value={master_value:.2f}, usage={optimal_usage_score:.2f}")
-    return metrics, min_rc_history, agent_expected_claims
+    # Make a deep copy so mutations later don’t clobber this policy:
+    saved_columns = [list(agent.columns) for agent in agents]
+    saved_distributions = [dist.copy() for dist in column_distributions]
+    return metrics, min_rc_history, cost_history, agent_expected_claims, saved_columns, saved_distributions
 
 # --- in util/training.py (or wherever you like) ------------------------------
 
