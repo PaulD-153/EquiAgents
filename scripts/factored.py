@@ -12,17 +12,35 @@ def main():
     FAIRNESS_METRICS = ["jain", "nsw", "minshare", "gini", "variance"]
     fairness_scores_dict = {metric: [] for metric in FAIRNESS_METRICS}
     fairness_scores_dict['return'] = []
+
+    num_episodes = 5
+    max_column_generation_rounds = 25000
+    verbose = False
+
+    horizon = 5
+    num_agents = 5
+    resource_capacity = 3
+    seeds = range(5)
+
+    # --- New: exogenous capacity‐limit process SL ---
+    SL_states = [0, 1, 2]                   # e.g. three discrete limit‐states
+    # Transition matrix TL: P[s' | s]
+    TL = np.array([
+        [0.8, 0.1, 0.1],
+        [0.2, 0.6, 0.2],
+        [0.1, 0.2, 0.7],
+    ])
+    # Limit function: maps (timestep, sL) → capacity
+    def limit_fn(t, sL):
+        # for example, state 0 → high cap, 1 → medium, 2 → low
+        caps = {0: resource_capacity,
+                1: int(0.75 * resource_capacity),
+                2: int(0.5 * resource_capacity)}
+        return caps[sL]
+
+
     lambda_values = [0, 1, 5, 10, 25, 50, 100, 200, 400, 600, 1000]
     for lambda_fair in lambda_values:
-        num_episodes = 5
-        max_column_generation_rounds = 25000
-        verbose = False
-
-        horizon = 5
-        num_agents = 5
-        resource_capacity = 3
-        seeds = range(5)
-
 
         reward_profile = {
             0: (5, 5),  # Agent 0 gets rewards
@@ -46,20 +64,34 @@ def main():
         all_metrics = []
         all_min_rc_histories = []
         all_agent_expected_claims = []
+        all_SL_trajectories = []
         for seed in seeds:
             np.random.seed(seed)
 
-            env, agents = build_env_and_agents(horizon, num_agents, resource_capacity, reward_profile, cost_profile, lambda_fair)
+            env, agents = build_env_and_agents(
+                horizon, num_agents,
+                resource_capacity,
+                reward_profile, cost_profile,
+                lambda_fair,
+                SL_states=SL_states,
+                TL=TL,
+                limit_fn=limit_fn
+            )
 
             # Train with master coordination
             print(f"Running column generation experiment for seed {seed}")
             metrics, min_rc_history, agent_expected_claims  = train_agents_with_dynamic_master(env, agents, num_episodes, verbose=verbose, max_column_generation_rounds=max_column_generation_rounds, langrangian_weight=lambda_fair, fairness_metrics=FAIRNESS_METRICS, fairness_scope=FAIRNESS_SCOPE)
+            # Store SL trajectories for analysis
+            all_SL_trajectories.append(env.sL_history)
             print(f"Metrics for seed {seed}: {metrics}")
             all_metrics.append(metrics)
             all_min_rc_histories.append(min_rc_history)
             all_agent_expected_claims.append(agent_expected_claims)
         with open(os.path.join('results', f"min_rc_history_all_seeds_({FAIRNESS_SCOPE},lambda={lambda_fair}).json"), "w") as f:
             json.dump(all_min_rc_histories, f)
+        # then dump to JSON alongside your other results
+        with open(os.path.join('results', f"SL_history_seed={seed}.json"), 'w') as f:
+            json.dump(all_SL_trajectories, f)
         # Combine metrics into one DataFrame
         dfs = [pd.DataFrame(m) for m in all_metrics]
         combined_df = pd.concat(dfs, ignore_index=True)

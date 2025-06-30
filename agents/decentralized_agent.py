@@ -8,20 +8,36 @@ np.seterr(invalid='ignore', divide='ignore')
 
 
 class DecentralizedAgentWithColumns:
-    def __init__(self, agent_id, horizon, resource_capacity, num_columns=5, verbose=True, reward_profile: Dict[int, tuple] = None, cost_profile: Dict[int, tuple] = None, langrangian_weight=1.0):
+    def __init__(self,
+                 agent_id,
+                 horizon,
+                 # resource_capacity no longer needed here; planner enforces it
+                 num_columns=5,
+                 verbose=True,
+                 reward_profile: Dict[int, tuple] = None,
+                 cost_profile: Dict[int, tuple] = None,
+                 langrangian_weight=1.0):
         self.agent_id = agent_id
         self.horizon = horizon
-        self.resource_capacity = resource_capacity
         self.num_columns = num_columns
         self.verbose = verbose
         self.columns = []
         self.selected_plan = None
+
+        # SL trajectory + capacity schedule will be injected by the trainer
+        self.SL_traj = []           
+        self.capacity_schedule = []
 
         self.reward_profile = reward_profile or {agent_id: (0.3, 1.0)}  # default fallback
         self.fixed_reward_vector = None
         self.cost_profile = cost_profile or {agent_id: (0.0, 1.0)}  # default fallback
         self.fixed_cost_vector = None
         self.langrangian_weight = langrangian_weight
+
+        # Provide default state‐dependent reward/cost functions
+        self.reward_fn = lambda t, sL: np.random.uniform(*self.reward_profile[self.agent_id])
+        self.cost_fn   = lambda t, sL: np.random.uniform(*self.cost_profile[self.agent_id])
+ 
 
         self.episode = 0
 
@@ -139,9 +155,18 @@ class DecentralizedAgentWithColumns:
         })
 
     def generate_best_response_column(self, dual_prices, fairness_duals=None):
-        reward_vector = self.fixed_reward_vector
-        cost_vector = self.fixed_cost_vector
-
+        # Build per‐timestep reward & cost based on SL_traj if available,
+        # otherwise fall back to a random draw from the profile.
+        reward_vector = np.array([
+            self.reward_fn(t, self.SL_traj[t]) if len(self.SL_traj) == self.horizon
+            else np.random.uniform(*self.reward_profile[self.agent_id])
+            for t in range(self.horizon)
+        ])
+        cost_vector = np.array([
+            self.cost_fn(t, self.SL_traj[t]) if len(self.SL_traj) == self.horizon
+            else np.random.uniform(*self.cost_profile[self.agent_id])
+            for t in range(self.horizon)
+        ])
         total_dual = np.array(dual_prices, dtype=float)
 
         if fairness_duals is None:
@@ -149,9 +174,10 @@ class DecentralizedAgentWithColumns:
         else:
             fairness_duals = np.array(fairness_duals, dtype=float)
 
+        # price out each timestep by its dual λ_t
         adjusted_reward = reward_vector - cost_vector * total_dual
-
-        if self.langrangian_weight is not None and fairness_duals is not None:
+        # if you also want to penalize for unfairness:
+        if self.langrangian_weight and fairness_duals is not None:
             adjusted_reward -= self.langrangian_weight * fairness_duals
 
         claim_vars = cv.Variable(self.horizon)

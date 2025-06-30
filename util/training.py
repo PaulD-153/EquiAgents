@@ -45,16 +45,42 @@ def train_agents_with_dynamic_master(env, agents, number_of_episodes, max_column
         agent.reset()
 
     for episode in range(number_of_episodes):
+        # --- NEW: reset env & sample the SL‐chain for this episode ---
         rc_per_episode = []
         env.reset()
+        # env.sL_history was reset in the env; now sample full horizon
+        SL_traj = [env.sL_history[0]]
+        for t in range(env.max_steps):
+            p = env.TL[env.SL_states.index(SL_traj[-1])]
+            next_sL = np.random.choice(env.SL_states, p=p)
+            SL_traj.append(next_sL)
+        # drop the final entry so we have exactly max_steps states
+        SL_traj = SL_traj[:env.max_steps]
+        # build capacity schedule per timestep
+        capacity_schedule = [
+            env.limit_fn(t, sL_t) for t, sL_t in enumerate(SL_traj)
+        ]
+        # --- NEW: let each agent know the SL trajectory for this episode ---
+        for agent in agents:
+            agent.SL_traj = SL_traj
+            agent.capacity_schedule = capacity_schedule
+
+        # now reset agent columns as before
         for agent in agents:
             agent.columns = agent.generate_candidate_columns()
 
         round_idx = 0
 
         while True:
-            master = MasterProblem(agents, resource_capacity=env.resource_capacity,
-                                   langrangian_weight=langrangian_weight, fairness_scope=fairness_scope)
+            master = MasterProblem(
+                agents,
+                # keep base_capacity around if needed for fallback
+                resource_capacity=env._base_capacity,
+                # NEW argument:
+                capacity_schedule=capacity_schedule,
+                langrangian_weight=langrangian_weight,
+                fairness_scope=fairness_scope
+            )
             master_value, _, fairness_impact = master.solve()
 
             if master.lp.status not in ["optimal", "optimal_inaccurate"]:

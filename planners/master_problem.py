@@ -6,7 +6,7 @@ from util.fairness_penalties import (
 
 
 class MasterProblem:
-    def __init__(self, agents, resource_capacity=1, langrangian_weight=1.0, fairness_type="variance", fairness_scope="timestep"):
+    def __init__(self, agents, resource_capacity=1, langrangian_weight=1.0, fairness_type="variance", fairness_scope="timestep", capacity_schedule=None):
         self.agents = agents
         self.horizon = agents[0].horizon
         self.num_agents = len(agents)
@@ -14,6 +14,7 @@ class MasterProblem:
         self.langrangian_weight = langrangian_weight
         self.fairness_type = fairness_type
         self.fairness_scope = fairness_scope  # "timestep" or "episode"
+        self.capacity_schedule = capacity_schedule  # Capacity schedule of lenght self.horizon
 
         self.decision_vars = []
         self.lp = None
@@ -43,7 +44,11 @@ class MasterProblem:
                 columns = agent.get_columns()
                 for c, column in enumerate(columns):
                     expected_total_claims += self.decision_vars[a][c] * column["claims"][t]
-            constraint = (expected_total_claims <= self.resource_capacity)
+            # pick per-timestep capacity if given, else static
+            cap_t = (self.capacity_schedule[t]
+                     if self.capacity_schedule is not None
+                     else self.resource_capacity)
+            constraint = (expected_total_claims <= cap_t)
             constraints.append(constraint)
             self.resource_constraints.append(constraint)
 
