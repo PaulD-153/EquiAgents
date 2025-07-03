@@ -109,6 +109,7 @@ def train_agents_with_dynamic_master(env, agents, number_of_episodes, max_column
             # Compute expected raw cost for this round using cost_fn & SL_traj
             dist = master.get_decision_distribution()
             expected_cost_round = 0.0
+            expected_net_value_round = 0.0
             for a, agent in enumerate(agents):
                 for c, column in enumerate(agent.columns):
                     # sum over timesteps: cost_fn(t, sL) * claim_prob
@@ -118,9 +119,13 @@ def train_agents_with_dynamic_master(env, agents, number_of_episodes, max_column
                         for t in range(agent.horizon)
                     )
                     expected_cost_round += dist[a][c] * (alpha * cost_c)
+                    # get the net value of this column
+                    reward = np.sum(column["reward"])
+                    net_value = reward - cost_c
 
-            
-            print(f"[Seed {seed}] Episode {episode}, Round {round_idx}: cost = {expected_cost_round:.4f}")
+                    expected_net_value_round += dist[a][c] * net_value
+
+            print(f"[Seed {seed}] Episode {episode}, Round {round_idx}: cost = {expected_cost_round:.4f}, net value = {expected_net_value_round:.4f}")
 
             cost_per_episode.append(expected_cost_round)
 
@@ -272,3 +277,89 @@ def tune_log_lambda(build_env_agents_fn,
             hi = mid
 
     return lam, f_mid, history
+
+
+def train_agents_primal_dual(env,
+                             agents,
+                             num_episodes: int,
+                             fairness_metric: str,
+                             fairness_scope: str,
+                             init_lambda: float = 1.0,
+                             beta_f: float = 0.95,
+                             alpha: float = 0.1,
+                             max_column_generation_rounds: int = 2500,
+                             verbose: bool = False,
+                             seed: int = None):
+    """
+    Online primal–dual training:
+      - env, agents: as usual
+      - num_episodes: number of sequential episodes
+      - fairness_metric: e.g. "jain"
+      - fairness_scope: "timestep" or "cumulative"
+      - init_lambda: starting fairness multiplier
+      - beta_f: target fairness threshold
+      - alpha: step size for dual update
+    Returns:
+      history: list of dicts with keys
+               ['episode','lambda','fairness','return','cost']
+    """
+    λ = init_lambda
+    history = []
+
+    # reset agents once
+    for agent in agents:
+        agent.reset()
+
+    f_ema = beta_f  # target fairness level
+
+    for ep in range(num_episodes):
+        if seed is not None:
+            np.random.seed(seed + ep)
+
+        # train exactly 1 episode under current λ
+        metrics, _, cost_history, *_ = train_agents_with_dynamic_master(
+            env, agents,
+            number_of_episodes=1,
+            max_column_generation_rounds=max_column_generation_rounds,
+            langrangian_weight=λ,
+            fairness_metrics=[fairness_metric],
+            fairness_scope=fairness_scope,
+            verbose=verbose,
+            seed=seed
+        )
+
+        # extract the realized fairness and return
+        f_val = metrics[f'expected_fairness_{fairness_metric}'][-1]
+        r_val = metrics['expected_return'][-1]
+        c_val = metrics.get('expected_cost', [None])[-1]
+
+        # hyperparams
+        k = 40.0
+        δ = 0.005
+
+        rho   = 0.5   # smoothing factor (0<ρ<1)
+        f_ema = rho*f_ema + (1-rho)*f_val
+
+        # after computing f_val and beta_f:
+        violation = beta_f - f_ema                             # positive if below target
+        delta = np.sign(violation) * (np.exp(k * abs(violation)) - 1.0)
+        λ = max(0.0, λ + alpha * delta)
+
+        history.append({
+            'episode':   ep,
+            'lambda':    λ,
+            'fairness':  f_ema,
+            'return':    r_val,
+            'cost':      c_val
+        })
+
+        if verbose:
+            print(f"[Ep {ep}] fairness={f_ema:.3f}, return={r_val:.2f}, cost={c_val:.2f}, λ→{λ:.3f}, update={delta:.3f}, violation={violation:.3f}")
+
+        # early stopping if we hit the target
+        if abs(violation) <= δ:  # δ is a small tolerance
+            if verbose:
+                print(f"Reached target fairness {beta_f} at episode {ep}, stopping training.")
+            break
+
+    return history

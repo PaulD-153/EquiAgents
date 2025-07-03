@@ -1,34 +1,21 @@
-import cvxpy as cv
 import numpy as np
+import matplotlib.pyplot as plt
 
-n_agents = 3
-horizon = 5
-resource_capacity = 2.0
+# Violation range
+violations = np.linspace(-1.0, 1.0, 500)
+k = 5  # Curvature parameter
 
-columns = {
-    agent_id: [np.full(horizon, 0.1)]
-    for agent_id in range(n_agents)
-}
-
-decision_vars = [
-    [cv.Variable(nonneg=True)]
-    for _ in range(n_agents)
-]
-
-constraints = [cv.sum(decision_vars[a]) == 1 for a in range(n_agents)]
-
-for t in range(horizon):
-    total_claim = sum(decision_vars[a][0] * columns[a][0][t] for a in range(n_agents))
-    constraints.append(total_claim <= resource_capacity)
-
-objective = cv.Maximize(
-    sum(decision_vars[a][0] * np.sum(columns[a][0]) for a in range(n_agents))
-)
-
-problem = cv.Problem(objective, constraints)
-problem.solve(solver=cv.ECOS_BB)
-
-print("Status:", problem.status)
-print("Objective:", problem.value)
-print("Decisions:", [v[0].value for v in decision_vars])
-print("Duals (resource constraints):", [c.dual_value for c in constraints[n_agents:]])
+# Compute delta using the exponential update rule
+delta = np.sign(violations) * (np.exp(k * np.abs(violations)) - 1)
+# Fix label formatting to avoid LaTeX parsing issues
+plt.figure(figsize=(8, 5))
+plt.plot(violations, delta, label='Delta update signal')
+plt.axhline(0, color='gray', linestyle='--')
+plt.axvline(0, color='gray', linestyle='--')
+plt.xlabel("Fairness violation")
+plt.ylabel("Update signal (Delta)")
+plt.title("Exponential Update Signal vs. Fairness Violation")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()

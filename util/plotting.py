@@ -2,6 +2,7 @@ import json
 import matplotlib.pyplot as plt
 import numpy as np
 import os
+import pandas as pd
 
 def plot_cost_history_all_seeds(out_dir, lambda_fair, cost_history, fairness_scope):
     plt.figure()
@@ -138,5 +139,26 @@ def plot_lambda_vs_fairness_history(history, target: float, metric: str, out_pat
     plt.legend()
     plt.grid(True, which="both", ls=":")
     plt.tight_layout()
+    plt.savefig(out_path)
+    plt.close()
+
+def plot_primal_dual_history(path_csv, out_path="results/plots/primal_dual.png"):
+    df = pd.read_csv(path_csv)
+    fig, ax1 = plt.subplots()
+
+    ax1.plot(df['episode'], df['fairness'], 'b-o', label='fairness')
+    ax1.axhline(df['lambda'].iloc[-1], color='gray', linestyle='--', label='λ (final)')
+    ax1.set_xlabel('Episode')
+    ax1.set_ylabel('Fairness', color='b')
+    ax1.tick_params(axis='y', labelcolor='b')
+
+    ax2 = ax1.twinx()
+    ax2.plot(df['episode'], df['lambda'], 'r-s', label='λ')
+    ax2.set_ylabel('λ (Lagrange multiplier)', color='r')
+    ax2.tick_params(axis='y', labelcolor='r')
+
+    fig.tight_layout()
+    plt.title('Online Primal–Dual Evolution')
+    plt.legend(loc='upper left')
     plt.savefig(out_path)
     plt.close()

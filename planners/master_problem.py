@@ -111,9 +111,6 @@ class MasterProblem:
         # print("Master LP Status:", self.lp.status)
         # print("Master LP Objective Value:", self.lp.value)
 
-        # Compute fairness gradients after solving
-        fairness_gradients_per_agent = self.compute_fairness_gradients()
-
         fairness_penalty_realized = self.compute_realized_fairness_penalty()
         fairness_impact = self.langrangian_weight * fairness_penalty_realized
 
