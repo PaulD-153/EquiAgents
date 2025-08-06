@@ -21,7 +21,7 @@ Create the environment from the included YAML file:
 
 ```bash
 conda env create -f environment.yml
-conda activate your-env-name  # replace with the name in the YAML
+conda activate equiagents  # replace with the name in the YAML
 ```
 
 ---

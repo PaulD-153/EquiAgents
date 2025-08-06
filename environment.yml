@@ -1,4 +1,4 @@
-name: alwayssafe
+name: equiagents
 channels:
   - conda-forge
   - defaults
