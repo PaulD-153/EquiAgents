@@ -6,7 +6,7 @@ from util.fairness_penalties import (
 
 
 class MasterProblem:
-    def __init__(self, agents, resource_capacity=1, langrangian_weight=1.0, fairness_type="variance", fairness_scope="timestep", capacity_schedule=None):
+    def __init__(self, agents, resource_capacity=1, langrangian_weight=1.0, fairness_type="variance", fairness_scope="timestep", capacity_schedule=None, use_gradient_fairness=False):
         self.agents = agents
         self.horizon = agents[0].horizon
         self.num_agents = len(agents)
@@ -15,6 +15,7 @@ class MasterProblem:
         self.fairness_type = fairness_type
         self.fairness_scope = fairness_scope  # "timestep" or "episode"
         self.capacity_schedule = capacity_schedule  # Capacity schedule of lenght self.horizon
+        self.use_gradient_fairness = use_gradient_fairness
 
         self.decision_vars = []
         self.lp = None
@@ -120,7 +121,6 @@ class MasterProblem:
         gradients_per_agent = []
 
         if self.fairness_scope == "timestep":
-            # Existing per-timestep fairness gradients
             gradients = []
             for t in range(self.horizon):
                 expected_claims_t = []
@@ -137,13 +137,11 @@ class MasterProblem:
 
                 gradients.append(grad_t)
 
-            # Per-agent gradients across timesteps
             for a in range(self.num_agents):
                 agent_grad = np.array([gradients[t][a] for t in range(self.horizon)])
                 gradients_per_agent.append(agent_grad)
 
         elif self.fairness_scope == "cumulative":
-            # Cumulative fairness gradients
             expected_cumulative_claims = []
             for a in range(self.num_agents):
                 expr = 0
@@ -156,7 +154,6 @@ class MasterProblem:
             else:
                 raise NotImplementedError("Only variance fairness implemented in gradient")
 
-            # Distribute same gradient to each timestep
             for a in range(self.num_agents):
                 agent_grad = np.array([grad_cumulative[a]] * self.horizon)
                 gradients_per_agent.append(agent_grad)
@@ -165,6 +162,7 @@ class MasterProblem:
             raise ValueError("Unknown fairness_scope option")
 
         return gradients_per_agent
+
 
     def get_dual_prices(self):
         return np.array([

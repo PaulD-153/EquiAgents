@@ -93,19 +93,26 @@ class DecentralizedAgentWithColumns:
             - cost_vector * total_dual      # congestion price
             - alpha       * cost_vector      # direct cost penalty
             )
-        # if you also want to penalize for unfairness:
+
+            # scale fairness_duals by langrangian_weight
         if self.langrangian_weight and fairness_duals is not None:
-            adjusted_reward -= self.langrangian_weight * fairness_duals
+            adjusted_reward -= fairness_duals
 
         claim_vars = cv.Variable(self.horizon)
+
+        # Regular L2 penalty to discourage aggressive plans
         penalty = 0.05 * cv.sum_squares(claim_vars)
         objective = cv.Maximize(cv.sum(cv.multiply(adjusted_reward, claim_vars)) - penalty)
         constraints = [claim_vars >= 0, claim_vars <= 1]
+
+        # Objective: reward - L2 penalty - KL regularization
+        objective = cv.Maximize(cv.sum(cv.multiply(adjusted_reward, claim_vars)) - penalty)
+        constraints = [claim_vars >= 0, claim_vars <= 1.0]
         problem = cv.Problem(objective, constraints)
 
-        # print(f"[Agent {self.agent_id}] Round RC check")
-        # print(f"  cost_vector:    {np.round(cost_vector, 3)}")
-        # print(f"  reward_vector:  {np.round(reward_vector, 3)}")
+        print(f"[Agent {self.agent_id}] Round RC check")
+        print(f"  cost_vector:    {np.round(cost_vector, 3)}")
+        print(f"  reward_vector:  {np.round(reward_vector, 3)}")
         # print(f"  dual_prices:    {np.round(total_dual, 3)}")
         # print(f"  fairness_grad:  {np.round(fairness_duals, 3)}")
         # print(f"  adjusted_reward:{np.round(adjusted_reward, 3)}")

@@ -1,10 +1,5 @@
-import os
-import json
 import numpy as np
-import pandas as pd
-from matplotlib import pyplot as plt
 from planners.master_problem import MasterProblem
-from tqdm import tqdm
 
 
 def compute_fairness_score(values, fairness_type, fairness_scope='timestep', horizon=None):
@@ -33,14 +28,16 @@ def compute_fairness_score(values, fairness_type, fairness_scope='timestep', hor
         raise ValueError(f"Unknown fairness type: {fairness_type}")
 
 def train_agents_with_dynamic_master(env, agents, number_of_episodes, max_column_generation_rounds=5, verbose=True,
-                                      langrangian_weight=None, fairness_metrics=None, fairness_scope='timestep', seed=None):
+                                      langrangian_weight=None, fairness_metrics=None, fairness_scope='timestep', use_gradient_fairness=True, seed=None):
 
     metrics = {'fairness_impact': [], 'expected_return': [], 'optimal usage': [], 'min_rc': []}
     min_rc_history = []
     cost_history = []
-
-    for fairness_eval in fairness_metrics:
-        metrics[f'expected_fairness_{fairness_eval}'] = []
+    net_value_history = []
+    expected_return_history = []
+    for fair_scope in ['timestep', 'cumulative']:
+        for fairness_eval in fairness_metrics:
+            metrics[f'expected_fairness_{fairness_eval}_{fair_scope}'] = []
 
     for agent in agents:
         agent.reset()
@@ -50,6 +47,8 @@ def train_agents_with_dynamic_master(env, agents, number_of_episodes, max_column
     for episode in range(number_of_episodes):
         cost_per_episode = []
         rc_per_episode = []
+        expected_reward_per_episode = []
+        net_value_per_episode = []
         env.reset()
         # --- 1) sample K SL trajectories, build each capacity schedule ---
         scenario_caps = []
@@ -98,7 +97,8 @@ def train_agents_with_dynamic_master(env, agents, number_of_episodes, max_column
                 # NEW argument:
                 capacity_schedule=capacity_schedule,
                 langrangian_weight=langrangian_weight,
-                fairness_scope=fairness_scope
+                fairness_scope=fairness_scope,
+                use_gradient_fairness=use_gradient_fairness,
             )
             master_value, _, fairness_impact = master.solve()
 
@@ -128,8 +128,10 @@ def train_agents_with_dynamic_master(env, agents, number_of_episodes, max_column
             print(f"[Seed {seed}] Episode {episode}, Round {round_idx}: cost = {expected_cost_round:.4f}, net value = {expected_net_value_round:.4f}")
 
             cost_per_episode.append(expected_cost_round)
+            net_value_per_episode.append(expected_net_value_round)
+            expected_reward_per_episode.append(master_value)
 
-            if langrangian_weight > 0:
+            if langrangian_weight > 0 and use_gradient_fairness:
                 fairness_gradients_per_agent = master.compute_fairness_gradients()
             else:
                 fairness_gradients_per_agent = [np.zeros(env.max_steps) for _ in range(len(agents))]
@@ -138,7 +140,7 @@ def train_agents_with_dynamic_master(env, agents, number_of_episodes, max_column
 
             new_columns = []
             for a_idx, agent in enumerate(agents):
-                fairness_dual = fairness_gradients_per_agent[a_idx]
+                fairness_dual = langrangian_weight * fairness_gradients_per_agent[a_idx]
                 column = agent.generate_best_response_column(dual_prices, fairness_duals=fairness_dual)
                 reduced_cost = agent.get_last_column_reduced_cost()
                 new_columns.append((column, reduced_cost))
@@ -193,14 +195,12 @@ def train_agents_with_dynamic_master(env, agents, number_of_episodes, max_column
         cumulative_claims = np.sum(expected_claims_per_timestep, axis=0)
 
         for fairness_eval in fairness_metrics:
-            if fairness_scope == "cumulative":
-                fairness_value = compute_fairness_score(cumulative_claims, fairness_type=fairness_eval, fairness_scope=fairness_scope, horizon=env.max_steps)
-                metrics[f'expected_fairness_{fairness_eval}'].append(fairness_value)
-            elif fairness_scope == "timestep":
-                fairness_values = [
-                    compute_fairness_score(expected_claims_per_timestep[t], fairness_type=fairness_eval, fairness_scope=fairness_scope, horizon=env.max_steps)
-                    for t in range(env.max_steps)]
-                metrics[f'expected_fairness_{fairness_eval}'].append(np.mean(fairness_values))
+            fairness_value = compute_fairness_score(cumulative_claims, fairness_type=fairness_eval, fairness_scope='cumulative', horizon=env.max_steps)
+            metrics[f'expected_fairness_{fairness_eval}_cumulative'].append(fairness_value)
+            fairness_values = [
+                compute_fairness_score(expected_claims_per_timestep[t], fairness_type=fairness_eval, fairness_scope='timestep', horizon=env.max_steps)
+                for t in range(env.max_steps)]
+            metrics[f'expected_fairness_{fairness_eval}_timestep'].append(np.mean(fairness_values))
 
         optimal_usage_score = np.sum(expected_claims_per_timestep) / (env.resource_capacity * env.max_steps)
         metrics['optimal usage'].append(optimal_usage_score)
@@ -209,11 +209,13 @@ def train_agents_with_dynamic_master(env, agents, number_of_episodes, max_column
         metrics['min_rc'].append(min_rc)
         min_rc_history.append(rc_per_episode)
         cost_history.append(cost_per_episode)
+        net_value_history.append(net_value_per_episode)
+        expected_return_history.append(expected_reward_per_episode)
 
     # Make a deep copy so mutations later don’t clobber this policy:
     saved_columns = [list(agent.columns) for agent in agents]
     saved_distributions = [dist.copy() for dist in column_distributions]
-    return metrics, min_rc_history, cost_history, agent_expected_claims, saved_columns, saved_distributions
+    return metrics, min_rc_history, cost_history, net_value_history, expected_return_history, agent_expected_claims, saved_columns, saved_distributions
 
 # --- in util/training.py (or wherever you like) ------------------------------
 
@@ -329,12 +331,12 @@ def train_agents_primal_dual(env,
         )
 
         # extract the realized fairness and return
-        f_val = metrics[f'expected_fairness_{fairness_metric}'][-1]
+        f_val = metrics[f'expected_fairness_{fairness_metric}_{fairness_scope}'][-1]
         r_val = metrics['expected_return'][-1]
         c_val = metrics.get('expected_cost', [None])[-1]
 
         # hyperparams
-        k = 40.0
+        k = 30.0
         δ = 0.005
 
         rho   = 0.5   # smoothing factor (0<ρ<1)

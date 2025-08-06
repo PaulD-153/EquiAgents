@@ -142,23 +142,53 @@ def plot_lambda_vs_fairness_history(history, target: float, metric: str, out_pat
     plt.savefig(out_path)
     plt.close()
 
-def plot_primal_dual_history(path_csv, out_path="results/plots/primal_dual.png"):
+def aggregate_histories_max(histories):
+    """
+    Pad each 1D history to the length of the longest with np.nan,
+    then return (mean, p25, p75) along axis=0.
+    """
+    # find longest length
+    L = max(len(h) for h in histories)
+    # pad each history to length L
+    padded = [h + [np.nan] * (L - len(h)) for h in histories]
+    arr    = np.array(padded, dtype=float)   # shape (n_seeds, L)
+    mean   = np.nanmean(arr, axis=0).tolist()
+    p25    = np.nanpercentile(arr, 25, axis=0).tolist()
+    p75    = np.nanpercentile(arr, 75, axis=0).tolist()
+    return mean, p25, p75
+
+def plot_primal_dual_history(path_csv,
+                             out_dir="results/plots",
+                             prefix="primal_dual"):
+    # ensure output directory exists
+    os.makedirs(out_dir, exist_ok=True)
+
     df = pd.read_csv(path_csv)
-    fig, ax1 = plt.subplots()
 
-    ax1.plot(df['episode'], df['fairness'], 'b-o', label='fairness')
-    ax1.axhline(df['lambda'].iloc[-1], color='gray', linestyle='--', label='λ (final)')
-    ax1.set_xlabel('Episode')
-    ax1.set_ylabel('Fairness', color='b')
-    ax1.tick_params(axis='y', labelcolor='b')
+    # --- Plot 1: Fairness ---
+    plt.figure()
+    plt.plot(df['episode'], df['fairness'], 'b-o', label='Fairness')
+    plt.xlabel('Episode')
+    plt.ylabel('Fairness')
+    plt.title('Fairness over Episodes')
+    plt.legend(loc='best')
+    plt.tight_layout()
 
-    ax2 = ax1.twinx()
-    ax2.plot(df['episode'], df['lambda'], 'r-s', label='λ')
-    ax2.set_ylabel('λ (Lagrange multiplier)', color='r')
-    ax2.tick_params(axis='y', labelcolor='r')
-
-    fig.tight_layout()
-    plt.title('Online Primal–Dual Evolution')
-    plt.legend(loc='upper left')
-    plt.savefig(out_path)
+    fairness_path = os.path.join(out_dir, f"{prefix}_fairness.png")
+    plt.savefig(fairness_path)
     plt.close()
+
+    # --- Plot 2: Lagrange multiplier (λ) ---
+    plt.figure()
+    plt.plot(df['episode'], df['lambda'], 'r-s', label='λ')
+    plt.xlabel('Episode')
+    plt.ylabel('λ (Lagrange multiplier)')
+    plt.title('Lagrange Multiplier over Episodes')
+    plt.legend(loc='best')
+    plt.tight_layout()
+
+    lambda_path = os.path.join(out_dir, f"{prefix}_lambda.png")
+    plt.savefig(lambda_path)
+    plt.close()
+
+    return fairness_path, lambda_path

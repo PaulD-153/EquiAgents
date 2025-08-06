@@ -11,11 +11,16 @@ def variance_penalty(claims):
     diffs = x - mean
     return cv.sum_squares(diffs)
 
-def variance_penalty_gradient(expected_claims):
-    n = len(expected_claims)
-    mean = sum(expected_claims) / n
-    gradient = [2 * (c - mean) / n for c in expected_claims]
-    return gradient
+def variance_penalty_gradient(x):
+    """
+    Gradient of variance with respect to x.
+    Input: x = list or array of agent claims
+    Output: gradient vector
+    """
+    x = np.array(x)
+    mean = np.mean(x)
+    n = len(x)
+    return (2.0 / n) * (x - mean)
 
 def variance_penalty_numpy(values):
     values = np.array(values)
