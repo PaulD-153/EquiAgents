@@ -1,7 +1,7 @@
 from agents.decentralized_agent import DecentralizedAgentWithColumns
 from env.resource_mdp_env import ResourceMDPEnv
 
-def build_env_and_agents(horizon, num_agents, resource_capacity, reward_profile, cost_profile, lambda_fair, SL_states, TL, limit_fn):
+def build_env_and_agents(horizon, num_agents, resource_capacity, reward_profile, cost_profile, lambda_fair, SL_states, TL, limit_fn, verbose=True):
     env = ResourceMDPEnv(
         n_agents=num_agents,
         resource_capacity=resource_capacity,
@@ -9,13 +9,14 @@ def build_env_and_agents(horizon, num_agents, resource_capacity, reward_profile,
         reward_profile=reward_profile,
         SL_states=SL_states,
         TL=TL,
-        limit_fn=limit_fn
+        limit_fn=limit_fn,
+        verbose=verbose
     )
     agents = [
         DecentralizedAgentWithColumns(
             agent_id=i,
             horizon=horizon,
-            verbose=False,
+            verbose=verbose,
             reward_profile=reward_profile,
             cost_profile=cost_profile,
             langrangian_weight=lambda_fair,

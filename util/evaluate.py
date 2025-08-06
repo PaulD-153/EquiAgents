@@ -1,7 +1,11 @@
 import numpy as np
 import scipy.stats as st
 
+
 def gini_index(x):
+    """
+    Compute Gini index for a given 1D array of values.
+    """
     x = np.sort(x)
     n = len(x)
     cumx = np.cumsum(x)
@@ -10,28 +14,42 @@ def gini_index(x):
         return 0.0
     return (n + 1 - 2 * np.sum(cumx) / total) / n
 
+
 def ci(data, confidence=0.95):
     """
-    Compute 95% confidence interval for a list of values.
-    Returns (mean, lower_bound, upper_bound)
+    Compute confidence interval (default 95%) for a list of values.
+    Returns: (mean, lower_bound, upper_bound)
     """
     mean = np.mean(data)
-    sem = st.sem(data)
-    margin = sem * st.t.ppf((1 + confidence) / 2., len(data)-1) if len(data) > 1 else 0
+    if len(data) > 1:
+        sem = st.sem(data)
+        margin = sem * st.t.ppf((1 + confidence) / 2., len(data) - 1)
+    else:
+        margin = 0
     return mean, mean - margin, mean + margin
-import numpy as np
+
 
 def mc_evaluate_policy(env_factory, agent_factory, saved_columns, column_distributions, num_rollouts=1000):
+    """
+    Monte Carlo evaluation of a fixed policy across multiple rollouts.
+    Returns dictionary of fairness metrics, usage, return, and violation stats.
+    """
+
+    # Aggregated results
     returns, usages = [], []
     jains, minshares, nsws, ginis, variances = [], [], [], [], []
+
+    # Per-timestep average metrics
     jains_timestep_means, minshares_timestep_means = [], []
     nsws_timestep_means, ginis_timestep_means, variances_timestep_means = [], [], []
+
     violations = 0
 
     for _ in range(num_rollouts):
         env = env_factory()
         agents = agent_factory()
 
+        # Set precomputed columns and distributions
         for a, agent in enumerate(agents):
             agent.columns = saved_columns[a]
             agent.distribution = column_distributions[a]
@@ -39,6 +57,7 @@ def mc_evaluate_policy(env_factory, agent_factory, saved_columns, column_distrib
         obs = env.reset()
         cum_reward = np.zeros(len(agents))
         cum_claims = np.zeros((env.max_steps, len(agents)))
+
         timestep_jain, timestep_minshare, timestep_nsw = [], [], []
         timestep_gini, timestep_variance = [], []
 
@@ -47,8 +66,8 @@ def mc_evaluate_policy(env_factory, agent_factory, saved_columns, column_distrib
         while not done:
             claims = []
             for a, agent in enumerate(agents):
-                c = np.random.choice(len(agent.columns), p=agent.distribution)
-                claims.append(agent.columns[c]["claims"][t])
+                idx = np.random.choice(len(agent.columns), p=agent.distribution)
+                claims.append(agent.columns[idx]["claims"][t])
             action = np.array(claims)
 
             obs, reward, done, info = env.step(action)
@@ -73,6 +92,7 @@ def mc_evaluate_policy(env_factory, agent_factory, saved_columns, column_distrib
 
             t += 1
 
+        # Cumulative fairness metrics
         total_claims = cum_claims.sum(axis=0)
         total_resource = env.resource_capacity * env.max_steps
 
@@ -82,6 +102,7 @@ def mc_evaluate_policy(env_factory, agent_factory, saved_columns, column_distrib
         gini = gini_index(total_claims)
         variance = np.var(total_claims)
 
+        # Store cumulative metrics
         returns.append(cum_reward.sum())
         usages.append(total_claims.sum() / total_resource)
         jains.append(jain)
@@ -90,7 +111,7 @@ def mc_evaluate_policy(env_factory, agent_factory, saved_columns, column_distrib
         ginis.append(gini)
         variances.append(variance)
 
-        # Average per-timestep fairness metrics
+        # Store per-timestep mean metrics
         jains_timestep_means.append(np.mean(timestep_jain))
         minshares_timestep_means.append(np.mean(timestep_minshare))
         nsws_timestep_means.append(np.mean(timestep_nsw))
@@ -100,16 +121,18 @@ def mc_evaluate_policy(env_factory, agent_factory, saved_columns, column_distrib
     return {
         "avg_return": ci(returns),
         "avg_usage": ci(usages),
+
         "avg_fairness_jain": ci(jains),
         "avg_fairness_minshare": ci(minshares),
         "avg_fairness_nsw": ci(nsws),
         "avg_fairness_gini": ci(ginis),
         "claim_variance": ci(variances),
+
         "avg_fairness_jain_timestep": ci(jains_timestep_means),
         "avg_fairness_minshare_timestep": ci(minshares_timestep_means),
         "avg_fairness_nsw_timestep": ci(nsws_timestep_means),
         "avg_fairness_gini_timestep": ci(ginis_timestep_means),
         "claim_variance_timestep": ci(variances_timestep_means),
+
         "capacity_violation_rate": np.round(violations / (num_rollouts * env.max_steps), 4)
     }
-
