@@ -2,98 +2,20 @@ name: equiagents
 channels:
   - conda-forge
   - defaults
+
 dependencies:
-  - blas=1.0
-  - bottleneck=1.3.7
-  - brotli=1.0.9
-  - brotli-bin=1.0.9
-  - ca-certificates=2025.6.15
-  - colorama=0.4.6
-  - contourpy=1.0.5
-  - cycler=0.11.0
-  - fonttools=4.51.0
-  - freetype=2.12.1
-  - highs=1.11.0
-  - icu=73.1
-  - importlib_resources=6.4.0
-  - intel-openmp=2023.1.0
-  - jpeg=9e
-  - kiwisolver=1.4.4
-  - krb5=1.20.1
-  - lcms2=2.16
-  - lerc=4.0.0
-  - libbrotlicommon=1.0.9
-  - libbrotlidec=1.0.9
-  - libbrotlienc=1.0.9
-  - libclang=14.0.6
-  - libclang13=14.0.6
-  - libdeflate=1.22
-  - libffi=3.4.4
-  - libpng=1.6.39
-  - libpq=17.2
-  - libtiff=4.5.1
-  - libwebp-base=1.3.2
-  - lz4-c=1.9.4
-  - matplotlib=3.7.2
-  - matplotlib-base=3.7.2
-  - mkl=2023.1.0
-  - mkl-service=2.4.0
-  - mkl_fft=1.3.8
-  - mkl_random=1.2.4
-  - numexpr=2.8.4
+  - python=3.8
   - numpy=1.24.3
-  - numpy-base=1.24.3
-  - openjpeg=2.5.2
-  - openssl=3.5.0
-  - packaging=24.1
   - pandas=2.0.3
-  - pillow=10.4.0
-  - ply=3.11
-  - pyparsing=3.0.9
-  - pyqt=5.15.10
-  - pyqt5-sip=12.13.0
-  - python=3.8.20
-  - python-dateutil=2.9.0post0
-  - python-tzdata=2023.3
-  - pytz=2024.1
-  - qt-main=5.15.2
-  - sip=6.7.12
-  - six=1.16.0
-  - sqlite=3.45.3
-  - tbb=2021.8.0
-  - tomli=2.0.1
-  - tornado=6.4.1
-  - tqdm=4.64.1
-  - ucrt=10.0.22621.0
-  - unicodedata2=15.1.0
-  - vc=14.42
-  - vc14_runtime=14.44.35208
-  - vs2015_runtime=14.44.35208
-  - wheel=0.44.0
-  - xz=5.6.4
-  - zipp=3.20.2
-  - zlib=1.2.13
-  - zstd=1.5.6
+  - matplotlib=3.7.2
+  - tqdm
+  - gym=0.21.0
+  - pip
   - pip:
-      - clarabel==0.9.0
-      - cloudpickle==3.1.1
+      - gym-factored==0.1.0
       - cvxpy==1.5.2
       - ecos==2.0.14
-      - gym==0.21.0
-      - gym-factored==0.1.0
-      - gym-notices==0.0.8
-      - highspy==1.11.0
-      - importlib-metadata==8.5.0
-      - joblib==1.4.2
-      - osqp==0.6.7.post3
-      - pip==21.3.1
-      - pyaml==25.5.0
-      - pyyaml==6.0.2
-      - qdldl==0.1.7.post5
+      - clarabel==0.9.0
       - scikit-learn==1.3.2
       - scikit-optimize==0.10.2
-      - scipy==1.10.1
-      - scs==3.2.7.post2
-      - setuptools==58.2.0
-      - threadpoolctl==3.5.0
-prefix: C:\Users\Pauld\anaconda3\envs\alwayssafe
+      - pyyaml
