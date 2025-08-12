@@ -1,54 +1,61 @@
 import json
-import matplotlib.pyplot as plt
-import numpy as np
 import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 
-def plot_min_rc_history_all_seeds(result_dir, lambda_fair=None, fairness_scope='timestep'):
+
+def plot_cost_history_all_seeds(out_dir, lambda_fair, cost_history, fairness_scope):
+    """Plot cost over column-generation rounds for all seeds."""
+    plt.figure()
+    for seed_idx, ch in enumerate(cost_history):
+        plt.plot(ch, label=f'Seed {seed_idx}', alpha=0.6)
+    plt.xlabel('Column Generation Round')
+    plt.ylabel('Expected Cost')
+    plt.title(f'Cost History (λ={lambda_fair}, {fairness_scope})')
+    plt.legend()
+    path = os.path.join(out_dir, f"cost_history_lambda={lambda_fair}.png")
+    plt.savefig(path)
+    plt.close()
+
+
+def plot_min_rc_history_all_seeds(result_dir, lambda_fair=None, fairness_scope='timestep', verbose=True):
+    """Plot convergence of minimal reduced cost across seeds."""
     filename = f"min_rc_history_all_seeds_({fairness_scope},lambda={lambda_fair}).json"
     filepath = os.path.join(result_dir, filename)
-    
+
     with open(filepath, 'r') as f:
         all_min_rc_history = json.load(f)
-    
+
     plt.figure(figsize=(10, 6))
     for seed_idx, min_rc_history in enumerate(all_min_rc_history):
-        # Each min_rc_history is list of episodes for this seed
-        # We average over episodes inside seed
         max_rounds = max(len(rc_list) for rc_list in min_rc_history)
         padded_rc = []
         for rc_list in min_rc_history:
-            if len(rc_list) < max_rounds:
-                rc_list = rc_list + [rc_list[-1]] * (max_rounds - len(rc_list))
-            padded_rc.append(rc_list)
-        padded_rc = np.array(padded_rc)
-        avg_rc = np.mean(padded_rc, axis=0)
-        
+            padded = rc_list + [rc_list[-1]] * (max_rounds - len(rc_list))
+            padded_rc.append(padded)
+        avg_rc = np.mean(np.array(padded_rc), axis=0)
         plt.plot(range(max_rounds), avg_rc, label=f"Seed {seed_idx}")
-    
-    plt.title("Reduced Cost Convergence across Seeds")
+
+    plt.title("Reduced Cost Convergence Across Seeds")
     plt.xlabel("Column Generation Round")
     plt.ylabel("Minimal Reduced Cost (min_rc)")
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
-    
-    output_path = os.path.join(result_dir, f"plots\min_rc_convergence_all_seeds_({fairness_scope},lambda={lambda_fair}).png")
+
+    output_path = os.path.join(result_dir, f"plots/min_rc_convergence_all_seeds_({fairness_scope},lambda={lambda_fair}).png")
     plt.savefig(output_path)
     plt.close()
-    print(f"Saved combined min_rc convergence plot to {output_path}")
+    if verbose:
+        print(f"Saved combined min_rc convergence plot to {output_path}")
 
 
-def plot_average_expected_claims(all_agent_expected_claims, out_dir="results", lambda_fair=None, fairness_scope='timestep'):
-    """
-    Plots average expected claims per agent across seeds.
-    
-    Args:
-        all_agent_expected_claims: list of numpy arrays (one per seed), each shape (num_agents,)
-        out_dir: output directory for saving plot
-    """
+def plot_average_expected_claims(all_agent_expected_claims, out_dir="results", lambda_fair=None, fairness_scope='timestep', verbose=True):
+    """Plot average expected claim per agent across seeds with error bars."""
     os.makedirs(out_dir, exist_ok=True)
 
-    expected_claims_array = np.array(all_agent_expected_claims)  # shape: (num_seeds, num_agents)
+    expected_claims_array = np.array(all_agent_expected_claims)
     average_claims = np.mean(expected_claims_array, axis=0)
     std_claims = np.std(expected_claims_array, axis=0)
 
@@ -56,25 +63,20 @@ def plot_average_expected_claims(all_agent_expected_claims, out_dir="results", l
     agent_ids = np.arange(len(average_claims))
     plt.bar(agent_ids, average_claims, yerr=std_claims, capsize=5)
     plt.xlabel("Agent ID")
-    plt.ylabel("Average Expected Claim Probability")
-    plt.title("Average Expected Claim Allocation across Seeds")
+    plt.ylabel("Average Expected Claim")
+    plt.title("Average Expected Claim Allocation Across Seeds")
     plt.grid(True)
     plt.tight_layout()
 
     filename = os.path.join(out_dir, f"expected_claims_average_all_seeds_({fairness_scope},lambda={lambda_fair}).png")
     plt.savefig(filename)
     plt.close()
-    print(f"Saved average expected claims plot to {filename}")
+    if verbose:
+        print(f"Saved average expected claims plot to {filename}")
 
-def plot_fairness_sweep(lambda_values, fairness_scores_dict, out_dir="results", fairness_scope='timestep'):
-    """
-    Plot fairness metrics over different Lagrangian weights (lambda_fair).
-    
-    Args:
-        lambda_values: list of lambda_fair values
-        fairness_scores_dict: dict of fairness metric name -> list of average values (same order as lambda_values)
-        out_dir: output directory
-    """
+
+def plot_fairness_sweep(lambda_values, fairness_scores_dict, out_dir="results", fairness_scope='timestep', verbose=True):
+    """Plot each fairness metric across different lambda values."""
     os.makedirs(out_dir, exist_ok=True)
 
     plt.figure(figsize=(10, 6))
@@ -83,7 +85,7 @@ def plot_fairness_sweep(lambda_values, fairness_scores_dict, out_dir="results", 
 
     plt.xlabel("Lagrangian Fairness Weight (λ)")
     plt.ylabel("Fairness Metric Value")
-    plt.title("Fairness Metrics vs Lagrangian Weight")
+    plt.title("Fairness Metrics vs. Lagrangian Weight")
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
@@ -91,35 +93,79 @@ def plot_fairness_sweep(lambda_values, fairness_scores_dict, out_dir="results", 
     filename = os.path.join(out_dir, f"plots/fairness_vs_lambda-{fairness_scope}.png")
     plt.savefig(filename)
     plt.close()
-    print(f"Saved fairness sweep plot to {filename}")
+    if verbose:
+        print(f"Saved fairness sweep plot to {filename}")
 
 
-def plot_lambda_vs_fairness(history, target=None, out_path=None):
-    """
-    history: list of (lambda, fairness)
-    """
-    lams, fs = zip(*history)
-    its = list(range(len(lams)))
+def plot_lambda_vs_fairness_history(history, target: float, metric: str, out_path: str):
+    """Plot fairness value as a function of lambda (log scale)."""
+    lambdas, fairness_vals = zip(*history)
 
-    fig, (ax1, ax2) = plt.subplots(2,1, figsize=(6,6))
+    plt.figure()
+    plt.semilogx(lambdas, fairness_vals, marker='o', linestyle='-', label=f"{metric.capitalize()} vs λ")
+    plt.axhline(y=target, color='gray', linestyle='--', label=f"Target = {target:.2f}")
 
-    # λ on a log‐scale
-    ax1.plot(its, lams, marker='o')
-    ax1.set_yscale('log')
-    ax1.set_xlabel("Iteration")
-    ax1.set_ylabel("λ (log scale)")
-    ax1.set_title("Search λ over iterations")
+    # Highlight best λ ≥ target
+    best_idx = max(
+        (i for i in range(len(history)) if fairness_vals[i] >= target),
+        default=None,
+        key=lambda i: fairness_vals[i]
+    )
+    if best_idx is not None:
+        best_lambda, best_fair = history[best_idx]
+        plt.scatter([best_lambda], [best_fair], color='red', label=f"λ ≈ {best_lambda:.4g}")
 
-    # fairness
-    ax2.plot(its, fs, marker='o')
-    if target is not None:
-        ax2.axhline(target, ls="--", color="gray", label=f"target={target}")
-        ax2.legend()
-    ax2.set_xlabel("Iteration")
-    ax2.set_ylabel("Fairness")
-    ax2.set_title("Fairness vs λ-iteration")
-
+    plt.xlabel("λ (log scale)")
+    plt.ylabel(f"{metric.capitalize()} Fairness")
+    plt.title(f"{metric.capitalize()} Fairness vs. λ")
+    plt.legend()
+    plt.grid(True, which="both", linestyle=":")
     plt.tight_layout()
-    if out_path:
-        plt.savefig(out_path)
-    plt.show()
+    plt.savefig(out_path)
+    plt.close()
+
+
+def aggregate_histories_max(histories):
+    """
+    Pad histories to equal length, return mean, 25th, and 75th percentiles.
+    Returns three lists of length L: mean, p25, p75.
+    """
+    L = max(len(h) for h in histories)
+    padded = [h + [np.nan] * (L - len(h)) for h in histories]
+    arr = np.array(padded, dtype=float)
+    mean = np.nanmean(arr, axis=0).tolist()
+    p25 = np.nanpercentile(arr, 25, axis=0).tolist()
+    p75 = np.nanpercentile(arr, 75, axis=0).tolist()
+    return mean, p25, p75
+
+
+def plot_primal_dual_history(path_csv, out_dir="results/plots", prefix="primal_dual"):
+    """Plot fairness and lambda values over primal-dual episodes."""
+    os.makedirs(out_dir, exist_ok=True)
+    df = pd.read_csv(path_csv)
+
+    # Plot fairness
+    plt.figure()
+    plt.plot(df['episode'], df['fairness'], 'b-o', label='Fairness')
+    plt.xlabel('Episode')
+    plt.ylabel('Fairness')
+    plt.title('Fairness over Episodes')
+    plt.legend(loc='best')
+    plt.tight_layout()
+    fairness_path = os.path.join(out_dir, f"{prefix}_fairness.png")
+    plt.savefig(fairness_path)
+    plt.close()
+
+    # Plot λ
+    plt.figure()
+    plt.plot(df['episode'], df['lambda'], 'r-s', label='λ')
+    plt.xlabel('Episode')
+    plt.ylabel('λ (Lagrange Multiplier)')
+    plt.title('Lagrange Multiplier over Episodes')
+    plt.legend(loc='best')
+    plt.tight_layout()
+    lambda_path = os.path.join(out_dir, f"{prefix}_lambda.png")
+    plt.savefig(lambda_path)
+    plt.close()
+
+    return fairness_path, lambda_path
